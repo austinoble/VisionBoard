@@ -1,0 +1,7 @@
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
+python-multipart>=0.0.9,<1
+pillow>=10,<13
+opencv-python-headless>=4.8,<5
+shapely>=2,<3
+numpy>=1.24,<3

@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+vendor_py/
+.pytest_cache/
+.mypy_cache/
+.DS_Store
+
+# Runtime state and datasets are deliberately external to this repository.
+data/*
+!data/.gitkeep
+
