@@ -45,11 +45,20 @@ const S = {
   navIndex: {},         // cls -> current prediction index
   colors: {},           // cls -> css color
   selected: null,       // {kind:'pred'|'gt', id}
+  selectedObject: null, // selected annotation object (used by explanation lookup)
   pendingFocus: null,   // instance waiting for its scene tile viewer to open
+  activeClass: "radar",
+  spatialNav: {},       // class/layer -> {history, cursor, visited}
+  stage0Image: null,
+  gradcamImage: null,
+  gradcamMeta: null,
+  explanationRequest: 0,
   ui: {
     showStage1: true, showStage2: true, showGt: false,
     evalMode: false,
     suppressStage1: true, perClassConf: true,
+    showStage0: false, showGradcam: false,
+    stage0Opacity: 0.50, gradcamOpacity: 0.55,
     conf: 0.30, iou: 0.30,
   },
   annRequest: 0,
@@ -92,6 +101,13 @@ function activePredictionSet() {
   return null;
 }
 
+function itemKey(item) { return `${item.kind}:${item.obj.id}`; }
+
+function objectCentre(obj) {
+  const n = Math.max(obj.poly.length, 1);
+  return obj.poly.reduce((a, p) => [a[0] + p[0] / n, a[1] + p[1] / n], [0, 0]);
+}
+
 function syncVisualEvaluation() {
   if (S.ui.showStage2 && S.stage2Eval) {
     S.eval = S.stage2Eval;
@@ -116,11 +132,20 @@ function navigationItems(cls) {
     .map((obj) => ({ kind: "pred", obj,
                      status: S.eval ? S.eval.pred_status[obj.id] : null }));
   if (!(S.ui.evalMode && S.eval)) return predictions;
-  const gtItems = S.ann.gt
-    .filter((g) => g.cls === cls && ["TP", "FN"].includes(S.eval.gt_status[g.id]))
-    .map((obj) => ({ kind: "gt", obj, status: S.eval.gt_status[obj.id] }));
+  const predictionById = new Map(layer.map((prediction) =>
+    [String(prediction.id), prediction]));
+  const predictionForGt = new Map(Object.entries(S.eval.matches || {}).map(
+    ([predictionId, gtId]) => [String(gtId), predictionById.get(String(predictionId))]));
+  const truePositives = S.ann.gt
+    .filter((g) => g.cls === cls && S.eval.gt_status[g.id] === "TP")
+    .map((gt) => predictionForGt.get(String(gt.id)))
+    .filter(Boolean)
+    .map((obj) => ({ kind: "pred", obj, status: "TP" }));
+  const falseNegatives = S.ann.gt
+    .filter((g) => g.cls === cls && S.eval.gt_status[g.id] === "FN")
+    .map((obj) => ({ kind: "gt", obj, status: "FN" }));
   const falsePositives = predictions.filter((x) => x.status === "FP");
-  return gtItems.concat(falsePositives);
+  return truePositives.concat(falseNegatives, falsePositives);
 }
 
 function classColor(cls) {
@@ -166,6 +191,28 @@ async function loadScenes() {
   $("btn-upload").classList.toggle("hidden", !S.ui.canUpload);
   $("btn-infer").classList.toggle("hidden", !S.ui.canInfer);
   $("btn-jobs").classList.toggle("hidden", !S.ui.canInfer);
+  updateScenePosition();
+}
+
+function currentSceneIndex() {
+  if (!S.cur) return -1;
+  return S.scenes.findIndex((scene) =>
+    scene.source === S.cur.source && scene.stem === S.cur.stem);
+}
+
+function updateScenePosition() {
+  const index = currentSceneIndex();
+  $("scene-position").textContent = `${index < 0 ? 0 : index + 1}/${S.scenes.length}`;
+}
+
+async function browseScene(direction) {
+  if (!S.scenes.length) return;
+  const current = currentSceneIndex();
+  const index = current < 0
+    ? (direction >= 0 ? 0 : S.scenes.length - 1)
+    : (current + direction + S.scenes.length) % S.scenes.length;
+  const scene = S.scenes[index];
+  await openScene(scene.source, scene.stem);
 }
 
 async function searchInstance(mode, inputId) {
@@ -224,10 +271,17 @@ async function openScene(source, stem) {
   S.stage2DetectionEval = null;
   S.evalLayer = null;
   S.selected = null;
+  S.selectedObject = null;
+  S.spatialNav = {};
+  S.stage0Image = null;
+  S.gradcamImage = null;
+  S.gradcamMeta = null;
+  $("cam-status").textContent = "No explanation selected";
   hideBoxInfo();
   $("scene-title").textContent =
     `${source}/${stem}  —  ${S.cur.width}×${S.cur.height}px`;
   $("btn-infer").disabled = !S.ui.canInfer;
+  updateScenePosition();
   updateConfidenceControls();
 
   // default to TP/FP/FN coloring whenever a scene can be evaluated (until the user
@@ -267,6 +321,7 @@ async function openScene(source, stem) {
   if (!S.viewer) S.tilePoll = setInterval(poll, 800);
 
   await reloadAnnotations();
+  if (S.ui.showStage0) loadStage0();
 }
 
 function startViewer(source, stem) {
@@ -322,8 +377,10 @@ async function reloadAnnotations() {
   S.ann.stage2 = S.ann.stage2 || [];
 
   S.navIndex = {};
+  S.spatialNav = {};
   rebuildClassList();
   await refreshEval();
+  if (S.ui.showGradcam) loadSelectedGradcam();
   requestDraw();
 }
 
@@ -381,50 +438,160 @@ function rebuildClassList() {
   for (const g of S.ann.gt) {
     (counts[g.cls] = counts[g.cls] || { p: 0, g: 0 }).g++;
   }
-  const el = $("class-list");
-  el.innerHTML = "";
-  for (const cls of orderedClasses(Object.keys(counts))) {
-    if (!(cls in S.classOn)) S.classOn[cls] = true;
-    const available = navigationItems(cls);
-    const current = available.length ? ((S.navIndex[cls] || 0) % available.length) + 1 : 0;
-    const row = document.createElement("div");
-    row.className = "class-row";
-    row.innerHTML = `
-      <input class="class-visible" type="checkbox" ${S.classOn[cls] ? "checked" : ""}>
-      <span class="class-swatch" style="background:${classColor(cls)}"></span>
-      <span class="class-name">${esc(cls)}</span>
-      <span class="cnt">${counts[cls].p}p/${counts[cls].g}g</span>
-      <span class="instance-nav">
-        <button class="prev-instance" ${available.length ? "" : "disabled"} title="Previous ${esc(cls)}">‹</button>
-        <span>${current}/${available.length}</span>
-        <button class="next-instance" ${available.length ? "" : "disabled"} title="Next ${esc(cls)}">›</button>
-      </span>`;
-    row.querySelector(".class-visible").onchange = (e) => {
-      S.classOn[cls] = e.target.checked;
-      requestDraw();
-    };
-    row.querySelector(".prev-instance").onclick = () => focusPrediction(cls, -1);
-    row.querySelector(".next-instance").onclick = () => focusPrediction(cls, 1);
-    el.appendChild(row);
-  }
+  const classes = orderedClasses(new Set([...CLASS_ORDER, ...Object.keys(counts)]));
+  for (const cls of classes) if (!(cls in S.classOn)) S.classOn[cls] = true;
+  const select = $("active-class");
+  const old = S.activeClass || "radar";
+  select.innerHTML = classes.map((cls) =>
+    `<option value="${esc(cls)}">${esc(cls)} · ${counts[cls]?.p || 0}p/${counts[cls]?.g || 0}g</option>`
+  ).join("");
+  S.activeClass = classes.includes(old) ? old : "radar";
+  select.value = S.activeClass;
+  updateClassNavigation();
+}
+
+function navigationState(cls) {
+  const key = `${S.evalLayer || activePredictionSet() || "none"}:${S.ui.evalMode}:${cls}`;
+  if (!S.spatialNav[key]) S.spatialNav[key] = { history: [], cursor: -1, visited: [] };
+  return S.spatialNav[key];
+}
+
+function updateClassNavigation() {
+  const cls = S.activeClass || "radar";
+  const items = navigationItems(cls);
+  const state = navigationState(cls);
+  $("instance-position").textContent = `${Math.min(state.visited.length, items.length)}/${items.length}`;
+  $("prev-instance").disabled = !items.length || state.cursor <= 0;
+  $("next-instance").disabled = !items.length;
 }
 
 function focusPrediction(cls, direction) {
   const items = navigationItems(cls);
   if (!items.length || !S.viewer || !S.viewer.isOpen()) return;
-  const old = S.navIndex[cls] == null ? (direction > 0 ? -1 : 0) : S.navIndex[cls];
-  const index = (old + direction + items.length) % items.length;
-  S.navIndex[cls] = index;
+  const byKey = new Map(items.map((item) => [itemKey(item), item]));
+  const state = navigationState(cls);
+  let item = null;
+
+  if (direction < 0 && state.cursor > 0) {
+    state.cursor -= 1;
+    item = byKey.get(state.history[state.cursor]);
+  } else if (direction > 0 && state.cursor < state.history.length - 1) {
+    state.cursor += 1;
+    item = byKey.get(state.history[state.cursor]);
+  } else if (direction > 0) {
+    const validKeys = new Set(items.map(itemKey));
+    state.visited = state.visited.filter((key) => validKeys.has(key));
+    let candidates = items.filter((candidate) => !state.visited.includes(itemKey(candidate)));
+    let currentItem = null;
+    if (S.selected) currentItem = byKey.get(`${S.selected.kind}:${S.selected.id}`) || null;
+    if (!currentItem && state.cursor >= 0) currentItem = byKey.get(state.history[state.cursor]) || null;
+    if (!candidates.length) {
+      state.visited = currentItem ? [itemKey(currentItem)] : [];
+      candidates = items.filter((candidate) => !state.visited.includes(itemKey(candidate)));
+    }
+    if (!candidates.length) candidates = items;
+    if (currentItem) {
+      const [cx, cy] = objectCentre(currentItem.obj);
+      candidates.sort((a, b) => {
+        const [ax, ay] = objectCentre(a.obj), [bx, by] = objectCentre(b.obj);
+        return ((ax-cx)**2 + (ay-cy)**2) - ((bx-cx)**2 + (by-cy)**2)
+          || ay - by || ax - bx || itemKey(a).localeCompare(itemKey(b));
+      });
+    } else {
+      candidates.sort((a, b) => {
+        const [ax, ay] = objectCentre(a.obj), [bx, by] = objectCentre(b.obj);
+        return ay - by || ax - bx || itemKey(a).localeCompare(itemKey(b));
+      });
+    }
+    item = candidates[0];
+    const key = itemKey(item);
+    state.history = state.history.slice(0, state.cursor + 1);
+    state.history.push(key);
+    state.cursor = state.history.length - 1;
+    if (!state.visited.includes(key)) state.visited.push(key);
+  }
+  if (!item) return;
   S.classOn[cls] = true;
-  const item = items[index];
-  const obj = item.obj;
-  focusObject(item.kind, obj, true);
-  rebuildClassList();
+  focusObject(item.kind, item.obj, true);
+  updateClassNavigation();
+}
+
+function selectedPredictionForCam() {
+  if (!S.selected) return null;
+  if (S.selected.kind === "pred") {
+    return [...S.ann.stage1, ...S.ann.stage2].find((p) => p.id === S.selected.id) || null;
+  }
+  if (!S.eval || S.selected.kind !== "gt") return null;
+  const match = Object.entries(S.eval.matches || {}).find(([, gtId]) =>
+    String(gtId) === String(S.selected.id));
+  if (!match) return null; // FN: there is no model prediction to explain
+  const layer = S.evalLayer === "stage1" ? S.ann.stage1 : S.ann.stage2;
+  return layer.find((p) => String(p.id) === String(match[0])) || null;
+}
+
+function loadStage0() {
+  const request = ++S.explanationRequest;
+  S.stage0Image = null;
+  if (!S.cur || !S.ui.showStage0) { requestDraw(); return; }
+  if (!S.cur.has_stage0) {
+    $("cam-status").textContent = "Stage0 heatmap unavailable for this scene";
+    requestDraw();
+    return;
+  }
+  $("cam-status").textContent = "Loading Stage0 heatmap…";
+  const image = new Image();
+  image.onload = () => {
+    if (request !== S.explanationRequest || !S.ui.showStage0) return;
+    S.stage0Image = image;
+    $("cam-status").textContent = "Stage0 objectness heatmap";
+    requestDraw();
+  };
+  image.onerror = () => {
+    if (request === S.explanationRequest) $("cam-status").textContent = "Stage0 heatmap failed to load";
+  };
+  image.src = `/api/scenes/${encodeURIComponent(S.cur.source)}/${encodeURIComponent(S.cur.stem)}/stage0.png`;
+}
+
+function loadSelectedGradcam() {
+  const request = ++S.explanationRequest;
+  S.gradcamImage = null;
+  S.gradcamMeta = null;
+  if (!S.cur || !S.ui.showGradcam) { requestDraw(); return; }
+  const prediction = selectedPredictionForCam();
+  if (!prediction) {
+    $("cam-status").textContent = S.selected?.kind === "gt"
+      ? "FN/GT has no prediction to explain" : "Select a TP or FP prediction";
+    requestDraw();
+    return;
+  }
+  if (!prediction.gradcam || !prediction.gradcam.url) {
+    $("cam-status").textContent = `Grad-CAM unavailable for ${prediction.id}`;
+    requestDraw();
+    return;
+  }
+  $("cam-status").textContent = `Loading ${prediction.id} Grad-CAM…`;
+  const image = new Image();
+  image.onload = () => {
+    if (request !== S.explanationRequest || !S.ui.showGradcam) return;
+    S.gradcamImage = image;
+    S.gradcamMeta = prediction.gradcam;
+    const models = (prediction.gradcam.models || []).join(" + ") || "model";
+    $("cam-status").textContent = `${prediction.id} · ${models}`;
+    requestDraw();
+  };
+  image.onerror = () => {
+    if (request === S.explanationRequest) $("cam-status").textContent = "Grad-CAM failed to load";
+  };
+  // CAM files may be regenerated while the server remains live. Avoid a stale
+  // browser copy when revisiting the same prediction.
+  image.src = `${prediction.gradcam.url}&v=${Date.now()}`;
 }
 
 function focusObject(kind, obj, detailed = false) {
   S.selected = { kind, id: obj.id };
+  S.selectedObject = obj;
   showBoxInfo({ kind, obj }, detailed);
+  if (S.ui.showGradcam) loadSelectedGradcam();
   if (!S.viewer || !S.viewer.isOpen()) {
     S.pendingFocus = { source: S.cur.source, stem: S.cur.stem, kind, obj };
     requestDraw();
@@ -534,6 +701,22 @@ function draw() {
   const evalOn = S.ui.evalMode && S.eval;
   const lw = 2 * dpr;                      // constant screen-space stroke → never pixelates
 
+  // ── mutually exclusive model-explanation rasters, below all vector boxes ──
+  ctx.imageSmoothingEnabled = true;
+  if (S.ui.showStage0 && S.stage0Image) {
+    ctx.save();
+    ctx.globalAlpha = S.ui.stage0Opacity;
+    ctx.drawImage(S.stage0Image, ox, oy, S.cur.width * scale, S.cur.height * scale);
+    ctx.restore();
+  } else if (S.ui.showGradcam && S.gradcamImage && S.gradcamMeta?.bounds) {
+    const [x1, y1, x2, y2] = S.gradcamMeta.bounds;
+    ctx.save();
+    ctx.globalAlpha = S.ui.gradcamOpacity;
+    ctx.drawImage(S.gradcamImage, ox + x1 * scale, oy + y1 * scale,
+                  (x2 - x1) * scale, (y2 - y1) * scale);
+    ctx.restore();
+  }
+
   // ── delete regions: always opaque black, never interactive ──
   for (const r of S.ann.delete_regions) {
     if (!vis(r.poly)) continue;
@@ -642,11 +825,17 @@ function handlePick(ix, iy) {
       if (!S.classOn[g.cls]) continue;
       if (pointInPoly(ix, iy, g.poly)) hits.push({ kind: "gt", obj: g, area: polyArea(g.poly) });
     }
-  if (!hits.length) { S.selected = null; hideBoxInfo(); requestDraw(); return; }
+  if (!hits.length) {
+    S.selected = null; S.selectedObject = null; S.gradcamImage = null; S.gradcamMeta = null;
+    if (S.ui.showGradcam) $("cam-status").textContent = "Select a TP or FP prediction";
+    hideBoxInfo(); requestDraw(); return;
+  }
   hits.sort((a, b) => a.area - b.area);          // smallest box wins (nested objects)
   const h = hits[0];
   S.selected = { kind: h.kind, id: h.obj.id };
+  S.selectedObject = h.obj;
   showBoxInfo(h);
+  if (S.ui.showGradcam) loadSelectedGradcam();
   requestDraw();
 }
 
@@ -678,6 +867,13 @@ function showBoxInfo(h, detailed = false) {
         if (matched && matched.instance_id) lines.push(`instance ID: ${matched.instance_id}`);
       }
       if (stt === "FP") lines.push("instance ID: unavailable (unmatched prediction)");
+    }
+    if (o.gradcam) {
+      const models = (o.gradcam.models || []).join(" + ") || "available";
+      lines.push(`Grad-CAM: ${models}`);
+      if (o.gradcam.contributors) lines.push(`contributors: ${o.gradcam.contributors.length}`);
+    } else {
+      lines.push("Grad-CAM: unavailable");
     }
   } else {
     const d = o.details || {};
@@ -959,6 +1155,8 @@ function bind() {
   $("btn-upload").onclick = uploadDialog;
   $("btn-infer").onclick = inferDialog;
   $("btn-jobs").onclick = jobsDialog;
+  $("btn-prev-scene").onclick = () => browseScene(-1).catch((e) => alert(e.message));
+  $("btn-next-scene").onclick = () => browseScene(1).catch((e) => alert(e.message));
   $("modal-backdrop").onclick = (e) => { if (e.target.id === "modal-backdrop") closeModal(); };
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
@@ -968,9 +1166,11 @@ function bind() {
   });
   const reloadAnnotationsDebounced = debounce(reloadSafely, 350);
   const stageChanged = () => {
+    S.spatialNav = {};
     updateConfidenceControls();
     syncVisualEvaluation();
     rebuildClassList();
+    if (S.ui.showGradcam) loadSelectedGradcam();
     requestDraw();
   };
   $("show-stage1").onchange = (e) => { S.ui.showStage1 = e.target.checked; stageChanged(); };
@@ -979,6 +1179,7 @@ function bind() {
   $("eval-mode").onchange = (e) => {
     S.evalTouched = true;
     S.ui.evalMode = e.target.checked;
+    S.spatialNav = {};
     if (S.ui.evalMode) rebuildClassList();
     $("eval-legend").classList.toggle("hidden", !S.ui.evalMode);
     if (S.ui.evalMode && !$("show-gt").checked) { $("show-gt").checked = true; S.ui.showGt = true; }
@@ -1005,8 +1206,45 @@ function bind() {
     $("iou-val").textContent = S.ui.iou.toFixed(2);
     refreshEvalDebounced();
   };
-  $("cls-all").onclick = () => { for (const c in S.classOn) S.classOn[c] = true; rebuildClassList(); requestDraw(); };
-  $("cls-none").onclick = () => { for (const c in S.classOn) S.classOn[c] = false; rebuildClassList(); requestDraw(); };
+  $("active-class").onchange = (e) => {
+    S.activeClass = e.target.value;
+    updateClassNavigation();
+  };
+  $("prev-instance").onclick = () => focusPrediction(S.activeClass, -1);
+  $("next-instance").onclick = () => focusPrediction(S.activeClass, 1);
+
+  $("show-stage0").onchange = (e) => {
+    S.ui.showStage0 = e.target.checked;
+    if (S.ui.showStage0) {
+      S.ui.showGradcam = false;
+      $("show-gradcam").checked = false;
+      S.gradcamImage = null; S.gradcamMeta = null;
+      loadStage0();
+    } else {
+      S.stage0Image = null;
+      $("cam-status").textContent = "No explanation selected";
+      requestDraw();
+    }
+  };
+  $("show-gradcam").onchange = (e) => {
+    S.ui.showGradcam = e.target.checked;
+    if (S.ui.showGradcam) {
+      S.ui.showStage0 = false;
+      $("show-stage0").checked = false;
+      S.stage0Image = null;
+      loadSelectedGradcam();
+    } else {
+      S.gradcamImage = null; S.gradcamMeta = null;
+      $("cam-status").textContent = "No explanation selected";
+      requestDraw();
+    }
+  };
+  $("stage0-opacity").oninput = (e) => {
+    S.ui.stage0Opacity = Number(e.target.value); requestDraw();
+  };
+  $("gradcam-opacity").oninput = (e) => {
+    S.ui.gradcamOpacity = Number(e.target.value); requestDraw();
+  };
 
   $("zoom-in").onclick = () => S.viewer && S.viewer.viewport.zoomBy(1.5).applyConstraints();
   $("zoom-out").onclick = () => S.viewer && S.viewer.viewport.zoomBy(1 / 1.5).applyConstraints();

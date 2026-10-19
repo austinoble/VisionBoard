@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lowres Detection GUI v7</title>
+<title>Lowres Detection GUI v8</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <div class="brand">🛰️ Lowres Detection&nbsp;GUI v7</div>
+  <div class="brand">🛰️ Lowres Detection&nbsp;GUI v8</div>
   <div id="scene-title" class="scene-title">no scene selected</div>
   <div class="header-actions">
     <button id="btn-upload" title="Upload a new image">⬆ Upload</button>
@@ -18,64 +18,6 @@
 </header>
 
 <div id="layout">
-  <!-- ── left: lookup + controls ─────────────────────────────────── -->
-  <aside id="panel">
-    <div id="instance-search-wrap">
-      <div class="dual-id-search">
-        <div class="id-search-box">
-          <label for="image-id-search">Image ID</label>
-          <div class="search-row">
-            <input id="image-id-search" type="search" maxlength="2" placeholder="01">
-            <button id="btn-image-id-search" title="Find image ID">⌕</button>
-          </div>
-        </div>
-        <div class="id-search-box">
-          <label for="instance-id-search">Full instance ID</label>
-          <div class="search-row">
-            <input id="instance-id-search" type="search" maxlength="5" placeholder="01m02">
-            <button id="btn-instance-id-search" title="Find full instance ID">⌕</button>
-          </div>
-        </div>
-      </div>
-      <div id="instance-results" class="hidden"></div>
-    </div>
-    <div class="control-spacer"></div>
-
-    <section>
-      <h3>Layers</h3>
-      <label><input type="checkbox" id="show-stage1" checked> Stage 1 — object <span class="legend stage1"></span></label>
-      <label><input type="checkbox" id="show-stage2" checked> Stage 2 — classified <span class="legend stage2"></span></label>
-      <label><input type="checkbox" id="show-gt"> Ground truth — class color <span class="legend dashed"></span></label>
-      <label><input type="checkbox" id="eval-mode"> <b>Evaluation mode</b> (TP&nbsp;/&nbsp;FP&nbsp;/&nbsp;FN)</label>
-      <label><input type="checkbox" id="suppress-stage1" checked> Suppress Stage 1 under Stage 2</label>
-      <div class="hint">Suppression is class-agnostic at IoU ≥ 0.30. With both stages visible, Stage 2 is evaluated and remaining Stage-1 boxes stay blue.</div>
-      <div id="eval-legend" class="hidden">
-        <span class="chip tp">TP</span><span class="chip fp">FP</span>
-      </div>
-    </section>
-
-    <section>
-      <h3>Thresholds</h3>
-      <label class="slider-row"><span id="conf-label">Confidence</span> ≥ <span id="conf-val">0.30</span>
-        <input type="range" id="conf-thr" min="0" max="1" step="0.01" value="0.30">
-      </label>
-      <label><input type="checkbox" id="per-class-conf" checked> Use shipped per-class confidence</label>
-      <div id="confidence-mode-note" class="hint">Global raw Stage-2 confidence; Stage 1 also uses the slider.</div>
-      <label class="slider-row">Match IoU ≥ <span id="iou-val">0.30</span>
-        <input type="range" id="iou-thr" min="0.1" max="0.9" step="0.05" value="0.30">
-      </label>
-    </section>
-
-    <section>
-      <h3>Classes</h3>
-      <div id="class-list"></div>
-      <div class="hint"><b>p</b> = predictions and <b>g</b> = GT after the active confidence and delete-region rules</div>
-      <div class="row-btns">
-        <button id="cls-all">all</button><button id="cls-none">none</button>
-      </div>
-    </section>
-  </aside>
-
   <!-- ── centre: deep-zoom viewer ────────────────────────────────── -->
   <main id="viewer-wrap">
     <div id="viewer"></div>
@@ -87,7 +29,7 @@
       <span id="zoom-level" title="Zoom relative to native image pixels">–</span>
     </div>
     <div id="viewer-placeholder">
-      <div id="placeholder-msg">Search an Image ID or full instance ID<br>in the left panel.</div>
+      <div id="placeholder-msg">Use the scene arrows or search below to open an image.</div>
       <div id="tile-progress" class="hidden">
         <div>Preparing tile pyramid… <span id="tile-progress-pct">0%</span></div>
         <div class="bar"><div id="tile-progress-fill"></div></div>
@@ -115,6 +57,68 @@
     </div>
   </aside>
 </div>
+
+<!-- ── compact, permanent controls ───────────────────────────────── -->
+<footer id="control-dock">
+  <div class="dock-row dock-navigation">
+    <div class="control-group scene-navigation" title="Browse scenes in sorted filename order">
+      <span class="group-label">Scene</span>
+      <button id="btn-prev-scene" title="Previous scene">‹</button>
+      <span id="scene-position">0/86</span>
+      <button id="btn-next-scene" title="Next scene">›</button>
+    </div>
+
+    <div id="instance-search-wrap" class="control-group">
+      <div class="compact-search">
+        <label for="image-id-search">Image ID</label>
+        <input id="image-id-search" type="search" maxlength="2" placeholder="01">
+        <button id="btn-image-id-search" title="Find image ID">⌕</button>
+      </div>
+      <div class="compact-search">
+        <label for="instance-id-search">Instance ID</label>
+        <input id="instance-id-search" type="search" maxlength="5" placeholder="01m02">
+        <button id="btn-instance-id-search" title="Find full instance ID">⌕</button>
+      </div>
+      <div id="instance-results" class="hidden"></div>
+    </div>
+
+    <div class="control-group class-navigation">
+      <label for="active-class" class="group-label">Class</label>
+      <select id="active-class" title="Active class for spatial instance navigation"></select>
+      <button id="prev-instance" title="Previous visited instance">‹</button>
+      <span id="instance-position">0/0</span>
+      <button id="next-instance" title="Nearest unvisited instance">›</button>
+    </div>
+    <div id="cam-status" class="status-note">No explanation selected</div>
+  </div>
+
+  <div class="dock-row dock-layers">
+    <div class="control-group checks">
+      <label><input type="checkbox" id="show-stage1" checked> Stage1</label>
+      <label><input type="checkbox" id="show-stage2" checked> Stage2</label>
+      <label><input type="checkbox" id="show-gt"> GT</label>
+      <label><input type="checkbox" id="eval-mode"> Evaluation</label>
+      <label><input type="checkbox" id="suppress-stage1" checked> Suppress S1</label>
+      <span id="eval-legend" class="hidden"><span class="chip tp">TP</span><span class="chip fp">FP</span></span>
+    </div>
+
+    <div class="control-group explanation-controls">
+      <label><input type="checkbox" id="show-stage0"> Stage0 heat</label>
+      <label class="mini-slider" title="Stage0 opacity">α <input type="range" id="stage0-opacity" min="0.05" max="0.95" step="0.05" value="0.50"></label>
+      <label><input type="checkbox" id="show-gradcam"> Selected Grad-CAM</label>
+      <label class="mini-slider" title="Grad-CAM opacity">α <input type="range" id="gradcam-opacity" min="0.05" max="0.95" step="0.05" value="0.55"></label>
+    </div>
+
+    <div class="control-group threshold-controls">
+      <label><input type="checkbox" id="per-class-conf" checked> Shipped thresholds</label>
+      <label class="mini-slider"><span id="conf-label">Conf</span> <span id="conf-val">0.30</span>
+        <input type="range" id="conf-thr" min="0" max="1" step="0.01" value="0.30"></label>
+      <label class="mini-slider">IoU <span id="iou-val">0.30</span>
+        <input type="range" id="iou-thr" min="0.1" max="0.9" step="0.05" value="0.30"></label>
+      <span id="confidence-mode-note" class="hint"></span>
+    </div>
+  </div>
+</footer>
 
 <!-- ── modals ──────────────────────────────────────────────────────── -->
 <div id="modal-backdrop" class="hidden">

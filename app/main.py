@@ -21,6 +21,8 @@ Route map (all JSON unless noted):
 """
 from __future__ import annotations
 
+import io
+import json
 import re
 import shutil
 from pathlib import Path
@@ -34,6 +36,33 @@ from . import config, evaluate, jobs, store, tiler
 from .adapters import ADAPTERS
 
 app = FastAPI(title="VisionBoard", docs_url="/api/docs")
+
+
+def _gradcam_manifest(scene: dict) -> dict:
+    path = scene.get("gradcam_manifest_path")
+    if not path:
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError, TypeError):
+        return {}
+    return data.get("predictions", data) if isinstance(data, dict) else {}
+
+
+def _attach_gradcam(predictions: list[dict], scene: dict) -> None:
+    manifest = _gradcam_manifest(scene)
+    for prediction in predictions:
+        entry = manifest.get(prediction["id"])
+        if isinstance(entry, dict):
+            prediction["gradcam"] = {
+                key: entry[key] for key in (
+                    "bounds", "models", "contributors", "method", "status"
+                ) if key in entry
+            }
+            prediction["gradcam"]["url"] = (
+                f"/api/scenes/{scene['source']}/{scene['stem']}/gradcam"
+                f"?prediction_id={prediction['id']}"
+            )
 
 
 def _scene_or_404(source: str, stem: str) -> dict:
@@ -193,6 +222,8 @@ def api_scene(source: str, stem: str):
                 has_stage2=s["stage2_path"] is not None,
                 has_stage2_raw=s["stage2_raw_path"] is not None,
                 has_stage2_vectors=s["stage2_vectors_path"] is not None,
+                has_stage0=s["stage0_path"] is not None,
+                has_gradcam=s["gradcam_manifest_path"] is not None,
                 has_pred=(s["stage1_path"] is not None or s["stage2_path"] is not None),
                 has_gt=s["gt_path"] is not None,
                 stage_suppress_iou=s["stage_suppress_iou"])
@@ -208,6 +239,8 @@ def api_annotations(source: str, stem: str,
         s, conf, confidence_mode, suppress_stage1)
     gt = ann.load_gt(s["gt_path"], s["gt_scale"]) if s["gt_path"] else []
     ann.attach_instance_ids(gt, s["instance_id_path"], s["instance_id_scale"])
+    _attach_gradcam(stage1, s)
+    _attach_gradcam(stage2, s)
     combined = [p for p in stage1 if not p.get("suppressed_by_stage2")] + stage2
     return dict(stage1=stage1, stage2=stage2, preds=combined, gt=gt,
                 delete_regions=regions,
@@ -244,6 +277,47 @@ def api_eval(source: str, stem: str,
     return evaluate.evaluate(preds, gt, iou_thr=iou, conf_thr=0.0,
                              ignore_difficult=ignore_difficult,
                              class_agnostic=class_agnostic)
+
+
+@app.get("/api/scenes/{source}/{stem}/stage0.png")
+def api_stage0(source: str, stem: str):
+    """Colorized full-scene Stage0 heatmap; browser scales native grid to display grid."""
+    import cv2
+    import numpy as np
+
+    scene = _scene_or_404(source, stem)
+    path = scene.get("stage0_path")
+    if not path:
+        raise HTTPException(404, "Stage0 heatmap unavailable")
+    heat = np.load(path).astype(np.float32)
+    heat = np.nan_to_num(heat, nan=0.0, posinf=1.0, neginf=0.0)
+    heat = np.clip(heat, 0.0, 1.0)
+    color = cv2.applyColorMap(np.uint8(heat * 255.0), cv2.COLORMAP_TURBO)
+    ok, encoded = cv2.imencode(".png", color)
+    if not ok:
+        raise HTTPException(500, "could not encode Stage0 heatmap")
+    return Response(content=encoded.tobytes(), media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/api/scenes/{source}/{stem}/gradcam")
+def api_gradcam(source: str, stem: str, prediction_id: str = Query(...)):
+    """Selected prediction's precomputed, spatially aligned CAM image."""
+    scene = _scene_or_404(source, stem)
+    entry = _gradcam_manifest(scene).get(prediction_id)
+    root = scene.get("gradcam_root")
+    if not isinstance(entry, dict) or not entry.get("file") or root is None:
+        raise HTTPException(404, "Grad-CAM unavailable for this prediction")
+    root = root.resolve()
+    path = (root / entry["file"]).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid Grad-CAM path") from exc
+    if not path.is_file():
+        raise HTTPException(404, "Grad-CAM image is missing")
+    return FileResponse(path, media_type="image/png",
+                        headers={"Cache-Control": "no-store"})
 
 
 # ── tiles ────────────────────────────────────────────────────────────────────────────────

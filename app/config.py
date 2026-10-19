@@ -78,14 +78,18 @@ LOWRES_RAW_STAGE2 = Path(os.environ.get(
 LOWRES_STAGE2_VECTORS = Path(os.environ.get(
     "VISIONBOARD_STAGE2_VECTORS",
     str(LOWRES_DEMO / "predictions" / "stage2_vectors"))).expanduser()
+LOWRES_STAGE0 = Path(os.environ.get(
+    "VISIONBOARD_STAGE0_ROOT", str(LOWRES_DEMO / "heatmaps" / "stage0"))).expanduser()
+LOWRES_GRADCAM = Path(os.environ.get(
+    "VISIONBOARD_GRADCAM_ROOT", str(LOWRES_DEMO / "explainability" / "gradcam"))).expanduser()
 LOWRES_STAGE2_THRESHOLDS = {
     "radar": 0.39, "missile": 0.85, "arty": 0.86, "logistic": 0.77,
     "camo": 0.42, "smallvehicle": 0.24, "tank": 0.54, "vehicle": 0.84,
 }
 SOURCES = [
     dict(
-        name="lowres_full80",
-        title="Low-resolution evaluation set (80 scenes)",
+        name=os.environ.get("VISIONBOARD_SOURCE_NAME", "lowres_full86"),
+        title=os.environ.get("VISIONBOARD_DATA_TITLE", "Low-resolution evaluation set"),
         images=str(LOWRES_DEMO / "images"),
         image_glob="*.png",
         strip_suffix="",
@@ -105,6 +109,8 @@ SOURCES = [
         gt=str(LOWRES_DEMO / "gt" / "labels_simple"),
         delete=str(LOWRES_DEMO / "gt" / "labels_delete"),
         instance_ids=str(LOWRES_DEMO / "gt" / "labels_detail_id"),
+        stage0=str(LOWRES_STAGE0),
+        gradcam=str(LOWRES_GRADCAM),
         pred_scale=1.0,
         gt_scale=1.0,
         instance_id_scale=2.0,

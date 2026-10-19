@@ -200,6 +200,24 @@ def stage2_vectors_path(src: dict, stem: str) -> Path | None:
     return _layer_path(src, "stage2_vectors", stem)
 
 
+def stage0_path(src: dict, stem: str) -> Path | None:
+    """Native-grid Stage0 heatmap stored as float16/float32 NumPy data."""
+    directory = src.get("stage0")
+    if not directory:
+        return None
+    path = Path(directory) / f"{stem}.npy"
+    return path if path.is_file() else None
+
+
+def gradcam_manifest_path(src: dict, stem: str) -> Path | None:
+    """Per-scene manifest mapping stable prediction IDs to CAM images + bounds."""
+    directory = src.get("gradcam")
+    if not directory:
+        return None
+    path = Path(directory) / "manifests" / f"{stem}.json"
+    return path if path.is_file() else None
+
+
 def generated_pred_target(src: dict, stem: str) -> Path:
     """Where GUI-run inference should save the prediction for this scene."""
     if src.get("writable"):
@@ -262,6 +280,8 @@ def list_scenes() -> list[dict]:
                 has_stage2=stage2_path(src, stem) is not None,
                 has_stage2_raw=stage2_raw_path(src, stem) is not None,
                 has_stage2_vectors=stage2_vectors_path(src, stem) is not None,
+                has_stage0=stage0_path(src, stem) is not None,
+                has_gradcam=gradcam_manifest_path(src, stem) is not None,
                 has_pred=(stage1_path(src, stem) is not None or
                           stage2_path(src, stem) is not None),
                 has_gt=gt_path(src, stem) is not None,
@@ -289,6 +309,9 @@ def get_scene(source: str, stem: str) -> dict | None:
         stage2_path=stage2_path(src, stem),
         stage2_raw_path=stage2_raw_path(src, stem),
         stage2_vectors_path=stage2_vectors_path(src, stem),
+        stage0_path=stage0_path(src, stem),
+        gradcam_manifest_path=gradcam_manifest_path(src, stem),
+        gradcam_root=(Path(src["gradcam"]) if src.get("gradcam") else None),
         gt_path=gt_path(src, stem),
         delete_path=delete_path(src, stem),
         instance_id_path=instance_id_path(src, stem),

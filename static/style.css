@@ -37,7 +37,7 @@ button.primary { background: var(--accent); color: #06121f; font-weight: 600; bo
 /* ── layout ─────────────────────────────────────────────── */
 #layout { flex: 1; display: flex; min-height: 0; }
 aside { background: var(--bg2); overflow-y: auto; flex: 0 0 auto; }
-#sidebar { width: 330px; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+#sidebar { width: 300px; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
 #panel { width: 350px; border-right: 1px solid var(--border); padding: 12px; }
 
 /* ID lookup at the top of the controls panel */
@@ -126,7 +126,7 @@ aside { background: var(--bg2); overflow-y: auto; flex: 0 0 auto; }
 #tile-progress .hint { font-size: 11px; margin-top: 6px; }
 
 #box-info {
-  position: absolute; top: 12px; right: 12px; width: min(400px, 38vw); max-height: calc(100% - 24px);
+  position: absolute; top: 12px; right: 12px; width: min(275px, 25vw); max-height: calc(100% - 24px);
   background: rgba(16,20,24,.66); border: 1px solid rgba(80,92,104,.72); border-radius: 7px;
   padding: 7px 9px; font: 11px/1.35 ui-monospace, monospace;
   pointer-events: auto; white-space: pre-wrap; overflow: auto; z-index: 5;
@@ -217,3 +217,72 @@ aside { background: var(--bg2); overflow-y: auto; flex: 0 0 auto; }
 }
 .hidden { display: none !important; }
 .hint { color: var(--fg-dim); font-size: 11px; }
+
+/* ── V8 compact bottom dock ─────────────────────────────── */
+#control-dock {
+  flex: 0 0 auto; min-height: 82px; background: rgba(18,23,28,.98);
+  border-top: 1px solid var(--border); padding: 5px 8px;
+  display: flex; flex-direction: column; gap: 5px; z-index: 15;
+}
+.dock-row {
+  min-width: 0; display: flex; align-items: center; gap: 7px;
+  white-space: nowrap;
+}
+.control-group {
+  min-width: 0; display: flex; align-items: center; gap: 5px;
+  height: 32px; padding: 3px 7px; background: #141a20;
+  border: 1px solid #252e37; border-radius: 7px;
+}
+.control-group + .control-group { margin-left: 0; }
+.group-label {
+  color: var(--fg-dim); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .05em;
+}
+#control-dock button { height: 24px; min-width: 27px; padding: 1px 7px; }
+#scene-position, #instance-position {
+  min-width: 42px; text-align: center; color: var(--fg-dim);
+  font: 11px ui-monospace, monospace;
+}
+#instance-search-wrap { position: relative; flex: 0 1 480px; border: 1px solid #252e37; padding: 3px 7px; }
+.compact-search { min-width: 0; display: flex; align-items: center; gap: 4px; }
+.compact-search label { color: var(--fg-dim); font-size: 10px; }
+.compact-search input {
+  width: 76px; min-width: 54px; height: 24px; padding: 2px 7px;
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 5px;
+  color: var(--fg); outline: none;
+}
+.compact-search + .compact-search input { width: 108px; }
+#instance-results {
+  position: absolute; left: 0; bottom: calc(100% + 5px); width: min(520px, 70vw);
+  max-height: 260px; margin: 0; z-index: 30; box-shadow: 0 10px 28px rgba(0,0,0,.48);
+}
+.class-navigation { flex: 0 0 auto; }
+#active-class {
+  height: 24px; min-width: 116px; padding: 1px 26px 1px 7px;
+  color: var(--fg); background: var(--bg3); border: 1px solid var(--border);
+  border-radius: 5px;
+}
+.status-note {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  color: var(--fg-dim); font: 10.5px ui-monospace, monospace;
+}
+.dock-layers { overflow-x: auto; overflow-y: hidden; }
+.checks label, .explanation-controls label, .threshold-controls label {
+  display: flex; align-items: center; gap: 3px; margin: 0; cursor: pointer;
+}
+.checks { flex: 0 0 auto; }
+.explanation-controls { flex: 0 0 auto; }
+.threshold-controls { flex: 1 0 520px; }
+.mini-slider { color: var(--fg-dim); font-size: 10.5px; }
+.mini-slider input[type=range] { width: 76px; margin: 0; }
+#confidence-mode-note {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; max-width: 330px;
+}
+#eval-legend { display: inline-flex; gap: 3px; }
+
+@media (max-width: 1100px) {
+  #sidebar { width: 250px; }
+  #instance-search-wrap { flex-basis: 370px; }
+  .status-note { display: none; }
+  #box-info { width: min(250px, 34vw); }
+}

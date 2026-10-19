@@ -1,6 +1,6 @@
 # VisionBoard
 
-VisionBoard is the source-only release of the Lowres Detection GUI V7. It visualizes large
+VisionBoard is the source-only release of the Lowres Detection GUI V8. It visualizes large
 satellite scenes with Stage 1 object proposals, Stage 2 classified detections, oriented
 ground truth, stable instance IDs, and per-scene evaluation metrics.
 
@@ -18,8 +18,15 @@ an external dataset root.
 - Shipped Stage 2 per-class thresholds enabled by default.
 - Delete-region blackout and exclusion from boxes, arrows, and metrics.
 - Search by two-character image ID or complete five-character instance ID.
-- Per-class arrow navigation through GT and false-positive predictions.
+- Per-class arrow navigation through TP/FP predictions and FN ground truth.
 - Collapsible `labels_detailed` metadata and Stage 2 top-three class scores.
+- Full-scene Stage0 objectness heatmaps, off by default, with opacity control.
+- Selected-prediction Grad-CAM for Stage1 and the highest-confidence Stage2 ensemble
+  contributor, off by default.
+- Mutually exclusive Stage0/Grad-CAM explanations so their color maps cannot be confused.
+- Sorted Previous/Next scene browsing without entering an image ID.
+- Nearest-unvisited spatial instance navigation with deterministic history.
+- A permanent two-row bottom control dock, leaving more horizontal space for imagery.
 
 ## Quick start
 
@@ -30,7 +37,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 
-export VISIONBOARD_DATA_ROOT=/absolute/path/to/lowres_full80
+export VISIONBOARD_DATA_ROOT=/absolute/path/to/lowres_full86
 bash run_gui.sh          # port 7860
 # bash run_gui.sh 8080   # alternate port
 ```
@@ -43,7 +50,7 @@ environment. Interactive API documentation is available at `/api/docs`.
 Every scene is joined by its filename stem:
 
 ```text
-lowres_full80/
+lowres_full86/
 ├── images/                         # displayed images2x PNGs
 │   └── <scene>.png
 ├── predictions/
@@ -54,6 +61,10 @@ lowres_full80/
 ├── classes/
 │   ├── stage1.txt
 │   └── stage2.txt
+├── heatmaps/stage0/<scene>.npy     # native-grid float heat in [0,1]
+├── explainability/gradcam/
+│   ├── manifests/<scene>.json      # prediction ID -> CAM path, bounds, provenance
+│   └── cams/{stage1,stage2}/*.png  # full-context color CAM crops
 └── gt/
     ├── labels_simple/<scene>.txt   # evaluation ground truth
     ├── labels_delete/<scene>.txt   # ignored/blackout polygons
@@ -67,15 +78,46 @@ The viewed image is the 2× super-resolved image. The current coordinate contrac
 - `labels_detail_id` is in native pixels and is scaled by 2 for display;
 - raw Stage 2 and vector coordinates are absolute displayed-image pixels.
 
-The default root is `data/lowres_full80`. Prefer environment variables for external data:
+The default root is `data/lowres_full80` only when no external root is supplied. Prefer
+environment variables for the 86-scene deployment:
 
 ```bash
 export VISIONBOARD_DATA_ROOT=/datasets/lowres_full80
 export VISIONBOARD_STAGE2_RAW=/runs/stage2/pred_all_c05
 export VISIONBOARD_STAGE2_VECTORS=/runs/stage2/pred_vectors
+export VISIONBOARD_STAGE0_ROOT=/runs/heatmaps/stage0
+export VISIONBOARD_GRADCAM_ROOT=/runs/explainability/gradcam
+export VISIONBOARD_SOURCE_NAME=lowres_full86
+export VISIONBOARD_DATA_TITLE="Low-resolution evaluation set (86 scenes)"
 ```
 
 The raw/vector defaults are folders below `VISIONBOARD_DATA_ROOT/predictions/`.
+
+## V8 explanation generation
+
+V8 precomputes explanations; the web server never loads model weights or occupies a GPU.
+This keeps browsing responsive and makes the displayed CAM reproducible. Generate Stage2
+first, then Stage1, binding the experiment to the intended physical GPU UUID:
+
+```bash
+export CUDA_VISIBLE_DEVICES=GPU-6f83fb5a-9b8f-65cd-6943-4ae998f756d7
+
+PYTHONPATH=/path/to/grad-cam/vendor \
+  /path/to/deploy_server/bundle_s2/env/bin/python \
+  scripts/generate_stage2_gradcam_v8.py --data "$VISIONBOARD_DATA_ROOT"
+
+/path/to/deploy_server/bundle/env/bin/python \
+  scripts/generate_stage1_gradcam_v8.py --data "$VISIONBOARD_DATA_ROOT"
+```
+
+Stage2 attributes each retained ensemble box to its contributing YOLO8m/YOLO11l TTA views
+and uses only the single contributor with the highest raw confidence; maps from the two
+models are never merged. Stage1 uses the final fused head, explaining its combined
+DINOv3 and convolutional-detail decision. Every retained TP and FP can therefore have a CAM;
+FNs cannot, because no prediction exists to explain.
+
+The standalone `grad-cam` package is needed only by the Stage2 generator. The GUI runtime
+dependencies remain exactly those in `requirements.txt`.
 
 ## File formats
 
@@ -189,7 +231,9 @@ Evaluation defaults to IoU 0.30:
 - Suppression affects visualization, not the separate Stage 1/2 metric panels.
 - Class rows stay fixed even at zero count, ordered:
   `radar, missile, tank, arty, camo, logistic, smallvehicle, vehicle, object`.
-- Class arrows traverse GT (TP and FN) plus FP predictions for the active evaluation layer.
+- Class arrows traverse TP predictions, FN ground truth, and FP predictions for the active
+  evaluation layer. A matched TP is focused through its prediction rather than its GT, so
+  prediction details and Grad-CAM are immediately available.
 - Direct clicks show a compact translucent panel. Arrow navigation provides detailed GT
   metadata or Stage 2 top-three class scores.
 
@@ -226,7 +270,7 @@ See [docs/DATA_FORMAT.md](docs/DATA_FORMAT.md),
 ## Optional inference adapter
 
 The repository includes the adapter code for the external YOLO+DINO inference engine, but
-does not include that engine, its environment, or model weights. The V7 release starts in
+does not include that engine, its environment, or model weights. The V8 release starts in
 viewer-only mode (`ENABLE_UPLOAD = False` and `ENABLE_INFERENCE = False` in
 `app/config.py`). If inference is enabled, configure the external engine without editing
 repository paths:
