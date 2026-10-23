@@ -127,5 +127,27 @@ def evaluate(preds: list[dict], gts: list[dict],
     total["f1"] = round(2 * tp / (2 * tp + fp + fn), 4) if 2 * tp + fp + fn else None
     stats["_overall"] = total
 
+    # Associate wrong-class predictions with the FN they overlap. These remain an FP and
+    # an FN in the metrics; the association exists only for visual review/navigation.
+    error_matches = {}
+    if not class_agnostic:
+        error_claimed = set()
+        fn_ids = {g["id"] for g in gts if gt_status.get(g["id"]) == "FN"}
+        for p in kept:
+            if pred_status.get(p["id"]) != "FP":
+                continue
+            best_iou, best_gt = 0.0, None
+            for g in gts:
+                if g["id"] not in fn_ids or g["id"] in error_claimed:
+                    continue
+                if p["cls"] == g["cls"]:
+                    continue
+                iou = _iou(pred_polys[p["id"]], gt_polys[g["id"]])
+                if iou > best_iou:
+                    best_iou, best_gt = iou, g
+            if best_gt is not None and best_iou >= iou_thr:
+                error_claimed.add(best_gt["id"])
+                error_matches[p["id"]] = best_gt["id"]
+
     return dict(pred_status=pred_status, gt_status=gt_status,
-                matches=matches, stats=stats)
+                matches=matches, error_matches=error_matches, stats=stats)

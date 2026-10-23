@@ -3,7 +3,7 @@
 VisionBoard joins images and text files by scene stem. For `images/A.png`, every optional
 layer is read from `<configured-folder>/A.txt`.
 
-## Built-in V8 source
+## Built-in v9 Test85 source
 
 Set `VISIONBOARD_DATA_ROOT` to a directory containing:
 
@@ -17,7 +17,7 @@ classes/stage1.txt
 classes/stage2.txt
 gt/labels_simple/
 gt/labels_delete/
-gt/labels_detail_id/
+gt/labels_detailed/
 heatmaps/stage0/
 explainability/gradcam/manifests/
 explainability/gradcam/cams/
@@ -36,9 +36,9 @@ displayed GT         = stored GT × gt_scale
 displayed details    = stored detailed geometry × instance_id_scale
 ```
 
-The V8 Lowres source uses displayed images2x imagery. Deployed predictions are normalized,
-`labels_simple` is already in images2x pixels, and `labels_detail_id` uses native pixels with
-`instance_id_scale=2.0`.
+The v9 Lowres source uses displayed images2x imagery. Deployed predictions are normalized;
+both `labels_simple` and canonical Test85 `labels_detailed` are already in images2x pixels,
+so `gt_scale=1.0` and `instance_id_scale=1.0`.
 
 ## Stage0 heatmaps
 
@@ -102,8 +102,9 @@ the file.
 x1 y1 x2 y2 x3 y3 x4 y4 class_name difficult
 ```
 
-Delete regions are variable-length polygons ending in `Delete`. A prediction is ignored when
-its centroid is inside a delete polygon.
+Delete regions are variable-length polygons ending in `Delete`. GT and predictions are ignored
+when their centroid is inside a delete polygon. The same regions are permanently blacked into
+generated display tiles, without modifying the source image.
 
 Detailed-ID files contain 26 fields. Fields 1–25 are the detailed label record; field 26 is
 the stable five-character instance ID. The backend joins detailed records to simple records
@@ -128,12 +129,12 @@ dict(
     stage2_classes="/data/example/classes/stage2.txt",
     gt="/data/example/gt/labels_simple",
     delete="/data/example/gt/labels_delete",
-    instance_ids="/data/example/gt/labels_detail_id",
+    instance_ids="/data/example/gt/labels_detailed",
     stage0="/data/example/heatmaps/stage0",
     gradcam="/data/example/explainability/gradcam",
     pred_scale=1.0,
     gt_scale=1.0,
-    instance_id_scale=2.0,
+    instance_id_scale=1.0,
     writable=False,
 )
 ```

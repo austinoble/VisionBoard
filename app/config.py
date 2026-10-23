@@ -72,7 +72,9 @@ ENABLE_INFERENCE = False
 # Only entries in SOURCES appear in the sidebar. Parked entries live in _DISABLED_SOURCES
 # below — move a dict between the two lists (and restart) to show/hide a dataset.
 LOWRES_DEMO = Path(os.environ.get(
-    "VISIONBOARD_DATA_ROOT", str(DATA / "lowres_full80"))).expanduser()
+    "VISIONBOARD_DATA_ROOT",
+    "/home/jovyan/SFS/CVW/AutoRA/DATA/LR_Data_06oct26/VisionBoard_Test85_Oct2026",
+)).expanduser()
 LOWRES_RAW_STAGE2 = Path(os.environ.get(
     "VISIONBOARD_STAGE2_RAW", str(LOWRES_DEMO / "predictions" / "stage2_raw"))).expanduser()
 LOWRES_STAGE2_VECTORS = Path(os.environ.get(
@@ -88,13 +90,14 @@ LOWRES_STAGE2_THRESHOLDS = {
 }
 SOURCES = [
     dict(
-        name=os.environ.get("VISIONBOARD_SOURCE_NAME", "lowres_full86"),
-        title=os.environ.get("VISIONBOARD_DATA_TITLE", "Low-resolution evaluation set"),
+        name=os.environ.get("VISIONBOARD_SOURCE_NAME", "test85_oct2026"),
+        title=os.environ.get("VISIONBOARD_DATA_TITLE", "October 2026 — Test85"),
         images=str(LOWRES_DEMO / "images"),
         image_glob="*.png",
         strip_suffix="",
         stage1=str(LOWRES_DEMO / "predictions" / "stage1"),
         stage2=str(LOWRES_DEMO / "predictions" / "stage2"),
+        stage2_is_shipped=True,
         stage2_raw=str(LOWRES_RAW_STAGE2),
         stage2_vectors=str(LOWRES_STAGE2_VECTORS),
         stage2_raw_format="dota",
@@ -108,12 +111,13 @@ SOURCES = [
         stage_suppress_iou=0.30,
         gt=str(LOWRES_DEMO / "gt" / "labels_simple"),
         delete=str(LOWRES_DEMO / "gt" / "labels_delete"),
-        instance_ids=str(LOWRES_DEMO / "gt" / "labels_detail_id"),
+        instance_ids=str(LOWRES_DEMO / "gt" / "labels_detailed"),
         stage0=str(LOWRES_STAGE0),
         gradcam=str(LOWRES_GRADCAM),
+        reviews=str(LOWRES_DEMO / "reviews"),
         pred_scale=1.0,
         gt_scale=1.0,
-        instance_id_scale=2.0,
+        instance_id_scale=1.0,
         writable=False,
     ),
 ]

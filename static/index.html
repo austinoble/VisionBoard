@@ -3,12 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lowres Detection GUI v8</title>
+<title>VisionBoard v9 · October Test85</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
 <header>
-  <div class="brand">🛰️ Lowres Detection&nbsp;GUI v8</div>
+  <button id="btn-confusion" class="header-nav" title="Open the Test85 confusion matrix">▦ Confusion</button>
+  <button id="btn-back-confusion" class="header-nav hidden" title="Return to the confusion matrix">← Back to matrix</button>
+  <div class="brand">🛰️ VisionBoard&nbsp;v9</div>
   <div id="scene-title" class="scene-title">no scene selected</div>
   <div class="header-actions">
     <button id="btn-upload" title="Upload a new image">⬆ Upload</button>
@@ -55,6 +57,23 @@
         <div id="classification-stats-table"></div>
       </section>
     </div>
+    <section id="review-panel">
+      <div class="review-head">
+        <div><h3>GT instance review</h3><span id="review-instance">Select a GT and press Space</span></div>
+        <button id="review-new" disabled title="Start a separate timestamped entry">New</button>
+      </div>
+      <textarea id="review-editor" disabled placeholder="Why was this instance missed? What could fix it?"></textarea>
+      <div class="review-actions">
+        <button id="review-save" class="primary" disabled>Save · ⌘S</button>
+        <button id="review-delete" disabled>Delete</button>
+        <span id="review-status"></span>
+      </div>
+      <div id="review-history"><span class="hint">Timestamped UTC entries will appear here.</span></div>
+      <div class="review-export">
+        <button id="review-export-json">Export JSON</button>
+        <button id="review-export-csv">Export CSV</button>
+      </div>
+    </section>
   </aside>
 </div>
 
@@ -85,9 +104,15 @@
     <div class="control-group class-navigation">
       <label for="active-class" class="group-label">Class</label>
       <select id="active-class" title="Active class for spatial instance navigation"></select>
+      <select id="nav-mode" title="Choose which evaluation outcomes the arrows visit">
+        <option value="all">All: TP/FP/FN</option>
+        <option value="fp">FP only</option>
+        <option value="fn">FN only</option>
+      </select>
       <button id="prev-instance" title="Previous visited instance">‹</button>
       <span id="instance-position">0/0</span>
       <button id="next-instance" title="Nearest unvisited instance">›</button>
+      <button id="context-zoom" title="Cycle object context (Z)">view 1×</button>
     </div>
     <div id="cam-status" class="status-note">No explanation selected</div>
   </div>
@@ -99,6 +124,7 @@
       <label><input type="checkbox" id="show-gt"> GT</label>
       <label><input type="checkbox" id="eval-mode"> Evaluation</label>
       <label><input type="checkbox" id="suppress-stage1" checked> Suppress S1</label>
+      <label title="Hide/show every canvas overlay (A)"><input type="checkbox" id="hide-overlays"> Hide overlays</label>
       <span id="eval-legend" class="hidden"><span class="chip tp">TP</span><span class="chip fp">FP</span></span>
     </div>
 
@@ -130,6 +156,6 @@
 </div>
 
 <script src="/static/vendor/openseadragon.min.js"></script>
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=9.0.3"></script>
 </body>
 </html>

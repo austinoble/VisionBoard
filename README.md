@@ -1,6 +1,6 @@
 # VisionBoard
 
-VisionBoard is the source-only release of the Lowres Detection GUI V8. It visualizes large
+VisionBoard is the source-only release of the Lowres Detection GUI V9. It visualizes large
 satellite scenes with Stage 1 object proposals, Stage 2 classified detections, oriented
 ground truth, stable instance IDs, and per-scene evaluation metrics.
 
@@ -15,10 +15,17 @@ an external dataset root.
 - Independent Stage 1, Stage 2, and ground-truth visual layers.
 - Stage 1 detection, Stage 2 detection, and Stage 2 classification metrics.
 - Exact polygon-IoU evaluation against `labels_simple`.
+- Timestamped, editable per-GT review notes stored as portable per-image JSON.
+- October 2026 Test85 as the default monthly evaluation set.
+- Interactive parent/child Stage 2 confusion page with two P_Camo interpretations and
+  direct image-, instance-, and FP-box links back into the viewer.
 - Shipped Stage 2 per-class thresholds enabled by default.
-- Delete-region blackout and exclusion from boxes, arrows, and metrics.
+- Delete-region exclusion from boxes, arrows, and metrics. Blackout is baked into generated
+  display tiles, so ignored content cannot flash through while zooming.
 - Search by two-character image ID or complete five-character instance ID.
-- Per-class arrow navigation through TP/FP predictions and FN ground truth.
+- Per-class nearest-neighbour navigation with `All TP/FP/FN`, `FP only`, and `FN only` loops.
+- `Q` switches between a TP/misclassification prediction and its matched GT; `Z` cycles
+  tight/2×/4× context without losing the navigation position; `A` hides all overlays.
 - Collapsible `labels_detailed` metadata and Stage 2 top-three class scores.
 - Full-scene Stage0 objectness heatmaps, off by default, with opacity control.
 - Selected-prediction Grad-CAM for Stage1 and the highest-confidence Stage2 ensemble
@@ -37,12 +44,14 @@ python3 -m venv .venv
 . .venv/bin/activate
 python -m pip install -r requirements.txt
 
-export VISIONBOARD_DATA_ROOT=/absolute/path/to/lowres_full86
+python scripts/prepare_test85_v9.py  # workspace setup; creates symlinks, not copies
+export VISIONBOARD_DATA_ROOT=/absolute/path/to/VisionBoard_Test85_Oct2026
 bash run_gui.sh          # port 7860
 # bash run_gui.sh 8080   # alternate port
 ```
 
-Open `http://localhost:7860`. Set `GUI_PYTHON=/path/to/python` to use an existing Python
+Open `http://localhost:7860`. The confusion page is at `/confusion` and is also available
+from the top-left button. Set `GUI_PYTHON=/path/to/python` to use an existing Python
 environment. Interactive API documentation is available at `/api/docs`.
 
 ## Platform data layout
@@ -50,7 +59,7 @@ environment. Interactive API documentation is available at `/api/docs`.
 Every scene is joined by its filename stem:
 
 ```text
-lowres_full86/
+VisionBoard_Test85_Oct2026/
 ├── images/                         # displayed images2x PNGs
 │   └── <scene>.png
 ├── predictions/
@@ -68,32 +77,32 @@ lowres_full86/
 └── gt/
     ├── labels_simple/<scene>.txt   # evaluation ground truth
     ├── labels_delete/<scene>.txt   # ignored/blackout polygons
-    └── labels_detail_id/<scene>.txt # 25 detailed columns + stable ID
+    └── labels_detailed/<scene>.txt  # 25 detailed columns + stable ID
 ```
 
 The viewed image is the 2× super-resolved image. The current coordinate contract is:
 
 - deployed Stage 1/2 coordinates are normalized to the displayed image;
 - `labels_simple` is in displayed-image pixels (`gt_scale=1.0`);
-- `labels_detail_id` is in native pixels and is scaled by 2 for display;
+- canonical Test85 `labels_detailed` is already in displayed images2x pixels;
 - raw Stage 2 and vector coordinates are absolute displayed-image pixels.
 
-The default root is `data/lowres_full80` only when no external root is supplied. Prefer
-environment variables for the 86-scene deployment:
+The project-workspace default is the symlink-only October Test85 runtime tree prepared by
+`scripts/prepare_test85_v9.py`. For another machine, set environment variables explicitly:
 
 ```bash
-export VISIONBOARD_DATA_ROOT=/datasets/lowres_full80
+export VISIONBOARD_DATA_ROOT=/datasets/VisionBoard_Test85_Oct2026
 export VISIONBOARD_STAGE2_RAW=/runs/stage2/pred_all_c05
 export VISIONBOARD_STAGE2_VECTORS=/runs/stage2/pred_vectors
 export VISIONBOARD_STAGE0_ROOT=/runs/heatmaps/stage0
 export VISIONBOARD_GRADCAM_ROOT=/runs/explainability/gradcam
-export VISIONBOARD_SOURCE_NAME=lowres_full86
-export VISIONBOARD_DATA_TITLE="Low-resolution evaluation set (86 scenes)"
+export VISIONBOARD_SOURCE_NAME=test85_oct2026
+export VISIONBOARD_DATA_TITLE="October 2026 — Test85"
 ```
 
 The raw/vector defaults are folders below `VISIONBOARD_DATA_ROOT/predictions/`.
 
-## V8 explanation generation
+## V8/V9 explanation generation
 
 V8 precomputes explanations; the web server never loads model weights or occupies a GPU.
 This keeps browsing responsive and makes the displayed CAM reproducible. Generate Stage2
@@ -172,12 +181,12 @@ Coordinates are absolute displayed-image pixels. Axis-aligned boxes and rotated 
 x1 y1 x2 y2 ... xN yN Delete
 ```
 
-These are ignore areas, not objects. They are always blacked out. Predictions whose centroid
-falls inside are hidden and excluded from metrics and arrow navigation.
+These are ignore areas, not objects. They are blacked into the generated display tiles.
+GT and predictions whose centroid falls inside are excluded from metrics and navigation.
 
 ### Detailed labels and IDs
 
-`labels_detail_id` has the normal 25-column detailed row plus the ID in column 26:
+`labels_detailed` has the normal 25-column detailed row plus the ID in column 26:
 
 ```text
 x1 y1 x2 y2 x3 y3 x4 y4 super_category fine_label
@@ -208,8 +217,8 @@ Shipped Stage 2 thresholds are enabled by default:
 | vehicle | 0.84 |
 
 `radar`, `missile`, `arty`, and `logistic` receive dedup priority. Cross-class boxes with
-polygon IoU ≥ 0.40 collapse after thresholding. If a scene lacks raw Stage 2 scores,
-per-class mode is unavailable for that scene rather than treating processed scores as raw.
+polygon IoU ≥ 0.40 collapse after thresholding. A source marked `stage2_is_shipped=True`
+contains the already-thresholded deployment output and is never thresholded a second time.
 
 Evaluation defaults to IoU 0.30:
 
@@ -231,11 +240,24 @@ Evaluation defaults to IoU 0.30:
 - Suppression affects visualization, not the separate Stage 1/2 metric panels.
 - Class rows stay fixed even at zero count, ordered:
   `radar, missile, tank, arty, camo, logistic, smallvehicle, vehicle, object`.
-- Class arrows traverse TP predictions, FN ground truth, and FP predictions for the active
-  evaluation layer. A matched TP is focused through its prediction rather than its GT, so
-  prediction details and Grad-CAM are immediately available.
+- Class arrows traverse all TP/FP/FN outcomes, FP only, or FN only. TP and FP focus their
+  prediction, while FN focuses GT. `Q` switches prediction ↔ GT for a TP or a spatially
+  associated wrong-class FP/FN pair.
+- `Z` cycles tight, 2×, and 4× context and keeps that level during arrow navigation. `A`
+  hides/shows all canvas overlays; baked Delete blackout remains in the imagery.
 - Direct clicks show a compact translucent panel. Arrow navigation provides detailed GT
   metadata or Stage 2 top-three class scores.
+
+## GT review workflow
+
+- Select any GT and press `Space` to open its review editor. Pressing `Space` on a TP or a
+  wrong-class prediction resolves its matched GT and opens that GT's review; an unmatched
+  background FP has no review target.
+- `Cmd+S` (macOS) or `Ctrl+S` saves. Enter inserts a normal line break.
+- Each saved entry has an immutable UTC creation timestamp. Existing entries can be edited;
+  saving an existing entry with empty text removes it. Explicit deletion asks for confirmation.
+- Reviews are stored as `<dataset-root>/reviews/<image-name>.json`, keyed by stable GT
+  instance ID. The panel can export every review for the current source as JSON or CSV.
 
 ## Source layout
 
@@ -256,8 +278,12 @@ jobs/logs, uploads, generated predictions, and runtime source registrations.
 |---|---|
 | `GET /api/scenes` | list scenes and available layers |
 | `GET /api/instances` | search image/full instance IDs |
+| `GET /api/confusion` | parent/child Stage 2 confusion events and deep-link metadata |
 | `GET /api/scenes/{source}/{stem}/annotations` | boxes, GT, details, IDs, delete regions |
 | `GET /api/scenes/{source}/{stem}/eval` | stage-specific evaluation |
+| `GET/POST /api/scenes/{source}/{stem}/reviews` | list or create instance reviews |
+| `PUT/DELETE /api/scenes/{source}/{stem}/reviews/{entry_id}` | edit or remove a review |
+| `GET /api/reviews/export?format=json\|csv` | export reviews for offline filtering |
 | `GET /api/scenes/{source}/{stem}/tile_status` | build/poll a tile pyramid |
 | `GET /api/scenes/{source}/{stem}/image.dzi` | Deep Zoom descriptor |
 | `POST /api/infer` | enqueue adapter inference |
@@ -270,7 +296,7 @@ See [docs/DATA_FORMAT.md](docs/DATA_FORMAT.md),
 ## Optional inference adapter
 
 The repository includes the adapter code for the external YOLO+DINO inference engine, but
-does not include that engine, its environment, or model weights. The V8 release starts in
+does not include that engine, its environment, or model weights. The V9 release starts in
 viewer-only mode (`ENABLE_UPLOAD = False` and `ENABLE_INFERENCE = False` in
 `app/config.py`). If inference is enabled, configure the external engine without editing
 repository paths:

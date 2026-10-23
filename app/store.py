@@ -312,6 +312,8 @@ def get_scene(source: str, stem: str) -> dict | None:
         stage0_path=stage0_path(src, stem),
         gradcam_manifest_path=gradcam_manifest_path(src, stem),
         gradcam_root=(Path(src["gradcam"]) if src.get("gradcam") else None),
+        review_root=(Path(src["reviews"]) if src.get("reviews") else
+                     Path(src["images"]).parent / "reviews"),
         gt_path=gt_path(src, stem),
         delete_path=delete_path(src, stem),
         instance_id_path=instance_id_path(src, stem),
@@ -323,6 +325,7 @@ def get_scene(source: str, stem: str) -> dict | None:
         stage2_classes=src.get("stage2_classes"),
         stage2_raw_format=src.get("stage2_raw_format", "dota"),
         stage2_raw_scale=float(src.get("stage2_raw_scale", 1.0)),
+        stage2_is_shipped=bool(src.get("stage2_is_shipped", False)),
         stage2_thresholds=dict(src.get("stage2_thresholds") or {}),
         stage2_priority=list(src.get("stage2_priority") or []),
         stage2_dedup_iou=float(src.get("stage2_dedup_iou", 0.40)),

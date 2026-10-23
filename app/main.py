@@ -25,6 +25,7 @@ import io
 import json
 import re
 import shutil
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
@@ -32,10 +33,19 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import annotations as ann
-from . import config, evaluate, jobs, store, tiler
+from . import config, confusion, evaluate, jobs, reviews as review_store, store, tiler
 from .adapters import ADAPTERS
 
 app = FastAPI(title="VisionBoard", docs_url="/api/docs")
+
+
+@lru_cache(maxsize=8)
+def _confusion_report(source: str, pcamo_mode: str) -> dict:
+    def loader(scene: dict):
+        _stage1, stage2, regions = _prepared_predictions(
+            scene, config.DEFAULT_CONF_THR, "per_class", True, include_vectors=False)
+        return stage2, regions
+    return confusion.build(source, pcamo_mode, loader, config.DEFAULT_IOU_THR)
 
 
 def _gradcam_manifest(scene: dict) -> dict:
@@ -72,6 +82,17 @@ def _scene_or_404(source: str, stem: str) -> dict:
     return scene
 
 
+def _review_instance_or_404(source: str, stem: str, instance_id: str) -> dict:
+    """Return the requested GT and prevent reviews from attaching to predictions/unknown IDs."""
+    scene = _scene_or_404(source, stem)
+    gt = ann.load_gt(scene["gt_path"], scene["gt_scale"]) if scene["gt_path"] else []
+    ann.attach_instance_ids(gt, scene["instance_id_path"], scene["instance_id_scale"])
+    match = next((item for item in gt if item.get("instance_id") == instance_id), None)
+    if not match:
+        raise HTTPException(404, f"GT instance {instance_id} not found in {source}/{stem}")
+    return match
+
+
 def _class_names(path_value) -> list[str] | None:
     if not path_value:
         return None
@@ -99,13 +120,16 @@ def _prediction_layers(scene: dict, conf: float = config.DEFAULT_CONF_THR,
         stage2 = ann.threshold_and_dedup(
             stage2, thresholds, scene["stage2_priority"], scene["stage2_dedup_iou"])
     else:
-        if confidence_mode == "per_class":
+        if confidence_mode == "per_class" and not scene.get("stage2_is_shipped"):
             raise ValueError("raw Stage-2 confidence scores are unavailable for this scene")
         stage2 = (ann.load_preds(scene["stage2_path"], scene["pred_scale"],
                                  class_names=_class_names(scene["stage2_classes"]),
                                  stage="stage2", **common)
                   if scene["stage2_path"] else [])
-        stage2 = [p for p in stage2 if p["score"] >= conf]
+        # Deployed files have already passed the shipped per-class operating point.
+        # Do not apply a second threshold to their calibrated display scores.
+        if confidence_mode != "per_class":
+            stage2 = [p for p in stage2 if p["score"] >= conf]
     if include_vectors:
         vectors = ann.load_prediction_vectors(scene.get("stage2_vectors_path"), 1.0)
         ann.attach_top_classes(stage2, vectors)
@@ -167,6 +191,14 @@ def api_scenes():
                 ui=dict(upload=config.ENABLE_UPLOAD, inference=config.ENABLE_INFERENCE))
 
 
+@app.get("/api/confusion")
+def api_confusion(source: str = Query("test85_oct2026"),
+                  pcamo_mode: str = Query("simple", pattern="^(simple|actual)$")):
+    if not store.get_source(source):
+        raise HTTPException(404, f"source {source} not found")
+    return _confusion_report(source, pcamo_mode)
+
+
 @app.get("/api/instances")
 def api_instances(q: str = Query(..., min_length=1),
                   mode: str = Query("full", pattern="^(full|image|instance)$"),
@@ -221,6 +253,7 @@ def api_scene(source: str, stem: str):
                 has_stage1=s["stage1_path"] is not None,
                 has_stage2=s["stage2_path"] is not None,
                 has_stage2_raw=s["stage2_raw_path"] is not None,
+                stage2_is_shipped=s.get("stage2_is_shipped", False),
                 has_stage2_vectors=s["stage2_vectors_path"] is not None,
                 has_stage0=s["stage0_path"] is not None,
                 has_gradcam=s["gradcam_manifest_path"] is not None,
@@ -239,6 +272,8 @@ def api_annotations(source: str, stem: str,
         s, conf, confidence_mode, suppress_stage1)
     gt = ann.load_gt(s["gt_path"], s["gt_scale"]) if s["gt_path"] else []
     ann.attach_instance_ids(gt, s["instance_id_path"], s["instance_id_scale"])
+    ann.mark_in_delete(gt, regions)
+    gt = [item for item in gt if not item.get("in_delete")]
     _attach_gradcam(stage1, s)
     _attach_gradcam(stage2, s)
     combined = [p for p in stage1 if not p.get("suppressed_by_stage2")] + stage2
@@ -260,7 +295,7 @@ def api_eval(source: str, stem: str,
     s = _scene_or_404(source, stem)
     if not s["gt_path"]:
         raise HTTPException(400, "scene needs both predictions and ground truth for evaluation")
-    stage1, stage2, _ = _prepared_predictions(
+    stage1, stage2, regions = _prepared_predictions(
         s, conf, confidence_mode, suppress_stage1, include_vectors=False)
     if prediction_set == "stage1":
         preds = stage1
@@ -273,10 +308,73 @@ def api_eval(source: str, stem: str,
     if not preds and not (s["stage1_path"] or s["stage2_path"]):
         raise HTTPException(400, "scene has no prediction file")
     gt = ann.load_gt(s["gt_path"], s["gt_scale"])
+    ann.mark_in_delete(gt, regions)
+    gt = [item for item in gt if not item.get("in_delete")]
     preds = [p for p in preds if not p.get("in_delete")]
     return evaluate.evaluate(preds, gt, iou_thr=iou, conf_thr=0.0,
                              ignore_difficult=ignore_difficult,
                              class_agnostic=class_agnostic)
+
+
+# ── timestamped GT reviews ───────────────────────────────────────────────────────────────
+@app.get("/api/scenes/{source}/{stem}/reviews")
+def api_reviews(source: str, stem: str, instance_id: str = Query(..., min_length=1)):
+    _review_instance_or_404(source, stem, instance_id)
+    try:
+        return review_store.list_instance(source, stem, instance_id)
+    except ValueError as exc:
+        raise HTTPException(500, str(exc)) from exc
+
+
+@app.post("/api/scenes/{source}/{stem}/reviews")
+def api_create_review(source: str, stem: str, body: dict):
+    instance_id = str(body.get("instance_id") or "").strip()
+    text = str(body.get("text") or "")
+    if not instance_id:
+        raise HTTPException(400, "instance_id is required")
+    _review_instance_or_404(source, stem, instance_id)
+    try:
+        return review_store.create(source, stem, instance_id, text)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.put("/api/scenes/{source}/{stem}/reviews/{entry_id}")
+def api_update_review(source: str, stem: str, entry_id: str, body: dict):
+    instance_id = str(body.get("instance_id") or "").strip()
+    text = str(body.get("text") or "")
+    if not instance_id:
+        raise HTTPException(400, "instance_id is required")
+    _review_instance_or_404(source, stem, instance_id)
+    try:
+        return review_store.update(source, stem, instance_id, entry_id, text)
+    except KeyError as exc:
+        raise HTTPException(404, f"review entry {entry_id} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.delete("/api/scenes/{source}/{stem}/reviews/{entry_id}")
+def api_delete_review(source: str, stem: str, entry_id: str,
+                      instance_id: str = Query(..., min_length=1)):
+    _review_instance_or_404(source, stem, instance_id)
+    try:
+        return review_store.remove(source, stem, instance_id, entry_id)
+    except KeyError as exc:
+        raise HTTPException(404, f"review entry {entry_id} not found") from exc
+
+
+@app.get("/api/reviews/export")
+def api_export_reviews(source: str = Query("test85_oct2026"),
+                       format: str = Query("json", pattern="^(json|csv)$")):
+    if not store.get_source(source):
+        raise HTTPException(404, f"source {source} not found")
+    try:
+        body, media_type, filename = review_store.export(source, format)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return Response(content=body, media_type=media_type,
+                    headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
 @app.get("/api/scenes/{source}/{stem}/stage0.png")
@@ -324,7 +422,8 @@ def api_gradcam(source: str, stem: str, prediction_id: str = Query(...)):
 @app.get("/api/scenes/{source}/{stem}/tile_status")
 def api_tile_status(source: str, stem: str):
     s = _scene_or_404(source, stem)
-    return tiler.ensure_build(source, stem, s["image_path"])
+    return tiler.ensure_build(source, stem, s["image_path"],
+                              s.get("delete_path"), s.get("gt_scale", 1.0))
 
 
 @app.get("/api/scenes/{source}/{stem}/image.dzi")
@@ -416,6 +515,11 @@ def api_job(job_id: str):
 @app.get("/", include_in_schema=False)
 def index():
     return HTMLResponse((config.STATIC / "index.html").read_text())
+
+
+@app.get("/confusion", include_in_schema=False)
+def confusion_page():
+    return HTMLResponse((config.STATIC / "confusion.html").read_text())
 
 
 app.mount("/static", StaticFiles(directory=str(config.STATIC)), name="static")

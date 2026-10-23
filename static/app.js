@@ -48,6 +48,10 @@ const S = {
   selectedObject: null, // selected annotation object (used by explanation lookup)
   pendingFocus: null,   // instance waiting for its scene tile viewer to open
   activeClass: "radar",
+  returnToConfusion: null,
+  reviewTarget: null,   // selected GT object with a stable instance ID
+  reviewEntries: [],
+  reviewEntryId: null,
   spatialNav: {},       // class/layer -> {history, cursor, visited}
   stage0Image: null,
   gradcamImage: null,
@@ -58,6 +62,7 @@ const S = {
     evalMode: false,
     suppressStage1: true, perClassConf: true,
     showStage0: false, showGradcam: false,
+    overlaysHidden: false, navMode: "all", contextScale: 1,
     stage0Opacity: 0.50, gradcamOpacity: 0.55,
     conf: 0.30, iou: 0.30,
   },
@@ -131,7 +136,7 @@ function navigationItems(cls) {
                      p.suppressed_by_stage2))
     .map((obj) => ({ kind: "pred", obj,
                      status: S.eval ? S.eval.pred_status[obj.id] : null }));
-  if (!(S.ui.evalMode && S.eval)) return predictions;
+  if (!(S.ui.evalMode && S.eval)) return S.ui.navMode === "all" ? predictions : [];
   const predictionById = new Map(layer.map((prediction) =>
     [String(prediction.id), prediction]));
   const predictionForGt = new Map(Object.entries(S.eval.matches || {}).map(
@@ -145,6 +150,8 @@ function navigationItems(cls) {
     .filter((g) => g.cls === cls && S.eval.gt_status[g.id] === "FN")
     .map((obj) => ({ kind: "gt", obj, status: "FN" }));
   const falsePositives = predictions.filter((x) => x.status === "FP");
+  if (S.ui.navMode === "fp") return falsePositives;
+  if (S.ui.navMode === "fn") return falseNegatives;
   return truePositives.concat(falseNegatives, falsePositives);
 }
 
@@ -157,20 +164,25 @@ function classColor(cls) {
 }
 
 function confidenceMode() {
-  return S.ui.perClassConf && S.cur && S.cur.has_stage2_raw ? "per_class" : "global";
+  return S.ui.perClassConf && S.cur && (S.cur.has_stage2_raw || S.cur.stage2_is_shipped)
+    ? "per_class" : "global";
 }
 
 function updateConfidenceControls() {
   const toggle = $("per-class-conf");
   const slider = $("conf-thr");
-  const rawAvailable = !S.cur || S.cur.has_stage2_raw;
+  const rawAvailable = !S.cur || S.cur.has_stage2_raw || S.cur.stage2_is_shipped;
   const perClassActive = S.ui.perClassConf && rawAvailable;
   toggle.disabled = !rawAvailable;
   slider.disabled = perClassActive && !S.ui.showStage1;
   $("conf-label").textContent = perClassActive && S.ui.showStage1
     ? "Stage-1 confidence" : "Confidence";
   let note;
-  if (!rawAvailable) {
+  if (S.cur?.stage2_is_shipped && !S.cur?.has_stage2_raw) {
+    note = S.ui.perClassConf
+      ? "Stage 2 uses the already-shipped operating-point output; the slider applies to Stage 1."
+      : "Global confidence is applied to the saved Stage 2 output.";
+  } else if (!rawAvailable) {
     note = "Raw Stage-2 scores unavailable for this scene; per-class mode is disabled.";
   } else if (perClassActive) {
     note = S.ui.showStage1
@@ -272,6 +284,7 @@ async function openScene(source, stem) {
   S.evalLayer = null;
   S.selected = null;
   S.selectedObject = null;
+  clearReviewPanel();
   S.spatialNav = {};
   S.stage0Image = null;
   S.gradcamImage = null;
@@ -430,20 +443,22 @@ const refreshEvalDebounced = debounce(refreshEval, 350);
 
 function rebuildClassList() {
   const counts = {};
-  for (const cls of CLASS_ORDER) counts[cls] = { p: 0, g: 0 };
-  for (const p of [...S.ann.stage2, ...S.ann.stage1]) {
-    if (p.in_delete) continue;
-    (counts[p.cls] = counts[p.cls] || { p: 0, g: 0 }).p++;
+  const stats = S.eval?.stats || {};
+  for (const cls of CLASS_ORDER) counts[cls] = { tp: 0, fp: 0, fn: 0 };
+  for (const [cls, values] of Object.entries(stats)) {
+    if (cls === "_overall") continue;
+    counts[cls] = { tp: values.tp || 0, fp: values.fp || 0, fn: values.fn || 0 };
   }
-  for (const g of S.ann.gt) {
-    (counts[g.cls] = counts[g.cls] || { p: 0, g: 0 }).g++;
-  }
+  if (S.evalLayer === "stage1" && stats._overall)
+    counts.object = { tp: stats._overall.tp || 0, fp: stats._overall.fp || 0,
+                      fn: stats._overall.fn || 0 };
   const classes = orderedClasses(new Set([...CLASS_ORDER, ...Object.keys(counts)]));
   for (const cls of classes) if (!(cls in S.classOn)) S.classOn[cls] = true;
   const select = $("active-class");
   const old = S.activeClass || "radar";
   select.innerHTML = classes.map((cls) =>
-    `<option value="${esc(cls)}">${esc(cls)} · ${counts[cls]?.p || 0}p/${counts[cls]?.g || 0}g</option>`
+    `<option value="${esc(cls)}">${esc(cls)} · ${counts[cls]?.tp || 0}TP/`+
+      `${counts[cls]?.fp || 0}FP/${counts[cls]?.fn || 0}FN</option>`
   ).join("");
   S.activeClass = classes.includes(old) ? old : "radar";
   select.value = S.activeClass;
@@ -451,7 +466,7 @@ function rebuildClassList() {
 }
 
 function navigationState(cls) {
-  const key = `${S.evalLayer || activePredictionSet() || "none"}:${S.ui.evalMode}:${cls}`;
+  const key = `${S.evalLayer || activePredictionSet() || "none"}:${S.ui.evalMode}:${S.ui.navMode}:${cls}`;
   if (!S.spatialNav[key]) S.spatialNav[key] = { history: [], cursor: -1, visited: [] };
   return S.spatialNav[key];
 }
@@ -601,8 +616,11 @@ function focusObject(kind, obj, detailed = false) {
   const minx = Math.min(...xs), maxx = Math.max(...xs);
   const miny = Math.min(...ys), maxy = Math.max(...ys);
   const pad = Math.max(24, Math.max(maxx - minx, maxy - miny) * 2.5);
+  const baseWidth = maxx - minx + 2 * pad, baseHeight = maxy - miny + 2 * pad;
+  const width = baseWidth * S.ui.contextScale, height = baseHeight * S.ui.contextScale;
+  const centreX = (minx + maxx) / 2, centreY = (miny + maxy) / 2;
   const rect = S.viewer.viewport.imageToViewportRectangle(
-    minx - pad, miny - pad, maxx - minx + 2 * pad, maxy - miny + 2 * pad);
+    centreX - width / 2, centreY - height / 2, width, height);
   S.viewer.viewport.fitBounds(rect, false);
   requestDraw();
 }
@@ -670,6 +688,8 @@ function draw() {
   const scale = (p1.x - p0.x) * dpr, ox = p0.x * dpr, oy = p0.y * dpr;
   $("zoom-level").textContent = (scale / dpr).toFixed(scale / dpr < 1 ? 2 : 1) + "×";
 
+  if (S.ui.overlaysHidden) return;
+
   const W = cv.width, H = cv.height;
   const vis = (poly) => {
     let minx = 1e18, miny = 1e18, maxx = -1e18, maxy = -1e18;
@@ -717,13 +737,7 @@ function draw() {
     ctx.restore();
   }
 
-  // ── delete regions: always opaque black, never interactive ──
-  for (const r of S.ann.delete_regions) {
-    if (!vis(r.poly)) continue;
-    trace(r.poly);
-    ctx.fillStyle = "#000000";
-    ctx.fill();
-  }
+  // Delete regions are baked into display tiles in v9 so they never lag during zoom.
 
   // ── GT: dotted class color; selection becomes a thick solid class-color line ──
   if (S.ui.showGt) {
@@ -812,6 +826,7 @@ function polyArea(poly) {
 }
 
 function handlePick(ix, iy) {
+  if (S.ui.overlaysHidden) return;
   const hits = [];
   if (S.ui.showStage1 || S.ui.showStage2)
     for (const p of activePredictions()) {
@@ -906,6 +921,245 @@ function showBoxInfo(h, detailed = false) {
   el.classList.remove("hidden");
 }
 function hideBoxInfo() { $("box-info").classList.add("hidden"); }
+
+function cycleContextZoom() {
+  S.ui.contextScale = S.ui.contextScale === 1 ? 2 : (S.ui.contextScale === 2 ? 4 : 1);
+  $("context-zoom").textContent = `view ${S.ui.contextScale}×`;
+  if (S.selectedObject && S.selected) focusObject(S.selected.kind, S.selectedObject, true);
+}
+
+function toggleCounterpart() {
+  if (!S.eval || !S.selected) return;
+  const direct = { ...(S.eval.matches || {}), ...(S.eval.error_matches || {}) };
+  if (S.selected.kind === "pred") {
+    const gtId = direct[S.selected.id];
+    if (gtId == null) return;
+    const gt = S.ann.gt.find((item) => String(item.id) === String(gtId));
+    if (!gt) return;
+    S.ui.showGt = true; $("show-gt").checked = true;
+    focusObject("gt", gt, true);
+    return;
+  }
+  const match = Object.entries(direct).find(([, gtId]) =>
+    String(gtId) === String(S.selected.id));
+  if (!match) return;
+  const layer = S.evalLayer === "stage1" ? S.ann.stage1 : S.ann.stage2;
+  const prediction = layer.find((item) => String(item.id) === String(match[0]));
+  if (prediction) focusObject("pred", prediction, true);
+}
+
+/* ── timestamped GT-instance reviews ─────────────────────────────────────── */
+function selectedGtForReview() {
+  if (!S.selected) return null;
+  if (S.selected.kind === "gt")
+    return S.ann.gt.find((gt) => String(gt.id) === String(S.selected.id)) || null;
+  const prediction = [...S.ann.stage1, ...S.ann.stage2]
+    .find((item) => String(item.id) === String(S.selected.id));
+  if (!prediction) return null;
+  const evaluation = prediction.layer === "stage1" ? S.stage1Eval : S.stage2Eval;
+  if (!evaluation) return null;
+  const links = { ...(evaluation.matches || {}), ...(evaluation.error_matches || {}) };
+  const gtId = links[prediction.id];
+  if (gtId == null) return null;
+  return S.ann.gt.find((gt) => String(gt.id) === String(gtId)) || null;
+}
+
+function reviewApi(target, suffix = "") {
+  return `/api/scenes/${encodeURIComponent(target.source)}/${encodeURIComponent(target.stem)}`
+    + `/reviews${suffix}`;
+}
+
+function formatReviewTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value || "unknown UTC";
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "UTC", day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).format(date) + " UTC";
+}
+
+function clearReviewPanel() {
+  S.reviewTarget = null;
+  S.reviewEntries = [];
+  S.reviewEntryId = null;
+  if (!$("review-editor")) return;
+  $("review-instance").textContent = "Select a GT and press Space";
+  $("review-editor").value = "";
+  $("review-editor").disabled = true;
+  $("review-new").disabled = true;
+  $("review-save").disabled = true;
+  $("review-delete").disabled = true;
+  $("review-status").textContent = "";
+  $("review-history").innerHTML = '<span class="hint">Timestamped UTC entries will appear here.</span>';
+}
+
+function renderReviewHistory() {
+  const history = $("review-history");
+  if (!S.reviewEntries.length) {
+    history.innerHTML = '<span class="hint">No saved reviews for this GT instance.</span>';
+    return;
+  }
+  history.innerHTML = S.reviewEntries.map((entry) =>
+    `<button class="review-entry ${entry.id === S.reviewEntryId ? "active" : ""}" data-review-id="${esc(entry.id)}">`
+    + `<time>${esc(formatReviewTime(entry.created_at_utc))}</time>`
+    + `<span>${esc(entry.text).replace(/\n/g, " ")}</span></button>`
+  ).join("");
+  history.querySelectorAll(".review-entry").forEach((button) => {
+    button.onclick = () => selectReviewEntry(button.dataset.reviewId);
+  });
+}
+
+function selectReviewEntry(entryId) {
+  const entry = S.reviewEntries.find((item) => item.id === entryId);
+  if (!entry) return;
+  S.reviewEntryId = entry.id;
+  $("review-editor").value = entry.text;
+  $("review-delete").disabled = false;
+  $("review-status").textContent = `Created ${formatReviewTime(entry.created_at_utc)}`;
+  renderReviewHistory();
+  $("review-editor").focus();
+}
+
+function newReviewEntry() {
+  if (!S.reviewTarget) return;
+  S.reviewEntryId = null;
+  $("review-editor").value = "";
+  $("review-delete").disabled = true;
+  $("review-status").textContent = "New timestamped entry";
+  renderReviewHistory();
+  $("review-editor").focus();
+}
+
+async function loadReviews(focusEditor = false) {
+  const target = S.reviewTarget;
+  if (!target) return;
+  const q = new URLSearchParams({ instance_id: target.instance_id });
+  const data = await api(`${reviewApi(target)}?${q}`);
+  if (S.reviewTarget !== target) return;
+  S.reviewEntries = data.entries || [];
+  if (S.reviewEntryId && !S.reviewEntries.some((entry) => entry.id === S.reviewEntryId))
+    S.reviewEntryId = null;
+  renderReviewHistory();
+  if (focusEditor) $("review-editor").focus();
+}
+
+async function openSelectedReview() {
+  const gt = selectedGtForReview();
+  if (!gt) {
+    $("review-status").textContent = S.selected?.kind === "pred"
+      ? "This prediction has no matched GT." : "Select a GT or matched prediction first.";
+    return;
+  }
+  if (!gt.instance_id || gt.instance_id === "Nil") {
+    $("review-status").textContent = "This GT has no stable instance ID.";
+    return;
+  }
+  S.ui.showGt = true;
+  $("show-gt").checked = true;
+  focusObject("gt", gt, true);
+  S.reviewTarget = { source: S.cur.source, stem: S.cur.stem,
+                     instance_id: gt.instance_id, cls: gt.cls };
+  S.reviewEntryId = null;
+  $("review-instance").textContent = `${gt.instance_id} · ${gt.cls}`;
+  $("review-editor").disabled = false;
+  $("review-new").disabled = false;
+  $("review-save").disabled = false;
+  $("review-delete").disabled = true;
+  $("review-editor").value = "";
+  $("review-status").textContent = "Loading reviews…";
+  try {
+    await loadReviews(true);
+    $("review-status").textContent = "New timestamped entry";
+  } catch (error) {
+    $("review-status").textContent = error.message;
+  }
+}
+
+async function saveReview() {
+  const target = S.reviewTarget;
+  if (!target) return;
+  const text = $("review-editor").value;
+  $("review-save").disabled = true;
+  $("review-status").textContent = "Saving…";
+  try {
+    if (S.reviewEntryId) {
+      await api(reviewApi(target, `/${encodeURIComponent(S.reviewEntryId)}`), {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance_id: target.instance_id, text }),
+      });
+    } else {
+      if (!text.trim()) {
+        $("review-status").textContent = "Empty new review was not saved.";
+        return;
+      }
+      const entry = await api(reviewApi(target), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ instance_id: target.instance_id, text }),
+      });
+      S.reviewEntryId = entry.id;
+    }
+    await loadReviews();
+    if (!S.reviewEntryId) {
+      $("review-editor").value = "";
+      $("review-delete").disabled = true;
+      $("review-status").textContent = "Empty entry removed.";
+    } else {
+      const saved = S.reviewEntries.find((entry) => entry.id === S.reviewEntryId);
+      $("review-status").textContent = saved
+        ? `Saved · ${formatReviewTime(saved.created_at_utc)}` : "Saved";
+    }
+  } catch (error) {
+    $("review-status").textContent = error.message;
+  } finally {
+    $("review-save").disabled = false;
+  }
+}
+
+async function deleteReview() {
+  const target = S.reviewTarget;
+  if (!target || !S.reviewEntryId) return;
+  if (!confirm("Delete this timestamped review entry?")) return;
+  const q = new URLSearchParams({ instance_id: target.instance_id });
+  try {
+    await api(`${reviewApi(target, `/${encodeURIComponent(S.reviewEntryId)}`)}?${q}`,
+      { method: "DELETE" });
+    S.reviewEntryId = null;
+    $("review-editor").value = "";
+    $("review-delete").disabled = true;
+    await loadReviews();
+    $("review-status").textContent = "Review deleted.";
+  } catch (error) {
+    $("review-status").textContent = error.message;
+  }
+}
+
+function exportReviews(format) {
+  const source = S.cur?.source || "test85_oct2026";
+  location.href = `/api/reviews/export?${new URLSearchParams({ source, format })}`;
+}
+
+async function openFromUrl() {
+  const params = new URLSearchParams(location.search);
+  const source = params.get("source"), stem = params.get("stem");
+  S.returnToConfusion = params.get("return");
+  S.returnToConfusionHistory = params.get("matrix_return") === "history";
+  $("btn-back-confusion").classList.toggle("hidden", !S.returnToConfusion);
+  if (!source || !stem) return;
+  await openScene(source, stem);
+  const instanceId = params.get("instance");
+  const predictionId = params.get("prediction");
+  if (instanceId) {
+    const gt = S.ann.gt.find((item) => item.instance_id === instanceId);
+    if (gt) {
+      S.ui.showGt = true; $("show-gt").checked = true;
+      focusObject("gt", gt, true);
+    }
+  } else if (predictionId) {
+    const prediction = [...S.ann.stage2, ...S.ann.stage1].find(
+      (item) => item.id === predictionId);
+    if (prediction) focusObject("pred", prediction, true);
+  }
+}
 
 /* ── modals ───────────────────────────────────────────────────────────────── */
 function openModal(title, bodyHTML, actions) {
@@ -1141,6 +1395,11 @@ async function jobsDialog() {
 
 /* ── wire up static controls ─────────────────────────────────────────────── */
 function bind() {
+  $("btn-confusion").onclick = () => { location.href = "/confusion"; };
+  $("btn-back-confusion").onclick = () => {
+    if (S.returnToConfusionHistory && history.length > 1) history.back();
+    else location.href = S.returnToConfusion || "/confusion";
+  };
   const runImageSearch = () => searchInstance("image", "image-id-search");
   const runInstanceSearch = () => searchInstance("full", "instance-id-search");
   $("btn-image-id-search").onclick = runImageSearch;
@@ -1157,6 +1416,11 @@ function bind() {
   $("btn-jobs").onclick = jobsDialog;
   $("btn-prev-scene").onclick = () => browseScene(-1).catch((e) => alert(e.message));
   $("btn-next-scene").onclick = () => browseScene(1).catch((e) => alert(e.message));
+  $("review-new").onclick = newReviewEntry;
+  $("review-save").onclick = () => saveReview();
+  $("review-delete").onclick = () => deleteReview();
+  $("review-export-json").onclick = () => exportReviews("json");
+  $("review-export-csv").onclick = () => exportReviews("csv");
   $("modal-backdrop").onclick = (e) => { if (e.target.id === "modal-backdrop") closeModal(); };
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
 
@@ -1210,8 +1474,18 @@ function bind() {
     S.activeClass = e.target.value;
     updateClassNavigation();
   };
+  $("nav-mode").onchange = (e) => {
+    S.ui.navMode = e.target.value;
+    S.spatialNav = {};
+    updateClassNavigation();
+  };
   $("prev-instance").onclick = () => focusPrediction(S.activeClass, -1);
   $("next-instance").onclick = () => focusPrediction(S.activeClass, 1);
+  $("context-zoom").onclick = cycleContextZoom;
+  $("hide-overlays").onchange = (e) => {
+    S.ui.overlaysHidden = e.target.checked;
+    requestDraw();
+  };
 
   $("show-stage0").onchange = (e) => {
     S.ui.showStage0 = e.target.checked;
@@ -1250,8 +1524,27 @@ function bind() {
   $("zoom-out").onclick = () => S.viewer && S.viewer.viewport.zoomBy(1 / 1.5).applyConstraints();
   $("zoom-home").onclick = () => S.viewer && S.viewer.viewport.goHome();
 
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === "s" && S.reviewTarget) {
+      e.preventDefault();
+      saveReview();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey ||
+        ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement?.tagName)) return;
+    if (e.code === "Space") { e.preventDefault(); openSelectedReview(); }
+    if (e.key.toLowerCase() === "q") { e.preventDefault(); toggleCounterpart(); }
+    if (e.key.toLowerCase() === "z") { e.preventDefault(); cycleContextZoom(); }
+    if (e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      S.ui.overlaysHidden = !S.ui.overlaysHidden;
+      $("hide-overlays").checked = S.ui.overlaysHidden;
+      requestDraw();
+    }
+  });
+
   new ResizeObserver(() => { sizeOverlay(); requestDraw(); }).observe($("viewer-wrap"));
 }
 
 bind();
-loadScenes(false).catch((e) => alert("failed to load scenes: " + e.message));
+loadScenes(false).then(openFromUrl).catch((e) => alert("failed to load scenes: " + e.message));

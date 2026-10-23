@@ -26,6 +26,7 @@ import threading
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 from . import config
 
@@ -50,7 +51,8 @@ def max_level(w: int, h: int) -> int:
     return max(0, math.ceil(math.log2(max(w, h))))
 
 
-def status(source: str, stem: str, image_path: Path) -> dict:
+def status(source: str, stem: str, image_path: Path,
+           delete_path: Path | None = None, delete_scale: float = 1.0) -> dict:
     """{'state': 'ready'|'building'|'none'|'error', 'progress': float}"""
     key = cache_key(source, stem)
     with _builds_lock:
@@ -62,16 +64,20 @@ def status(source: str, stem: str, image_path: Path) -> dict:
     if mp.is_file():
         try:
             meta = json.loads(mp.read_text())
-            if meta.get("src_mtime") == image_path.stat().st_mtime:
+            delete_mtime = delete_path.stat().st_mtime if delete_path and delete_path.is_file() else None
+            if (meta.get("src_mtime") == image_path.stat().st_mtime
+                    and meta.get("delete_mtime") == delete_mtime
+                    and float(meta.get("delete_scale", 1.0)) == float(delete_scale)):
                 return {"state": "ready", "progress": 1.0}
         except Exception:
             pass
     return {"state": "none", "progress": 0.0}
 
 
-def ensure_build(source: str, stem: str, image_path: Path) -> dict:
+def ensure_build(source: str, stem: str, image_path: Path,
+                 delete_path: Path | None = None, delete_scale: float = 1.0) -> dict:
     """Kick off a pyramid build in the background if one isn't ready/in-flight."""
-    st = status(source, stem, image_path)
+    st = status(source, stem, image_path, delete_path, delete_scale)
     if st["state"] in ("ready", "building"):
         return st
     key = cache_key(source, stem)
@@ -79,7 +85,8 @@ def ensure_build(source: str, stem: str, image_path: Path) -> dict:
         if key in _builds:  # raced another request
             return dict(_builds[key])
         _builds[key] = {"state": "building", "progress": 0.0}
-    t = threading.Thread(target=_build, args=(source, stem, image_path), daemon=True)
+    t = threading.Thread(target=_build,
+                         args=(source, stem, image_path, delete_path, delete_scale), daemon=True)
     t.start()
     return {"state": "building", "progress": 0.0}
 
@@ -90,7 +97,8 @@ def _set_progress(key: str, p: float) -> None:
             _builds[key]["progress"] = round(p, 3)
 
 
-def _build(source: str, stem: str, image_path: Path) -> None:
+def _build(source: str, stem: str, image_path: Path,
+           delete_path: Path | None = None, delete_scale: float = 1.0) -> None:
     key = cache_key(source, stem)
     pdir = pyramid_dir(source, stem)
     try:
@@ -100,6 +108,21 @@ def _build(source: str, stem: str, image_path: Path) -> None:
         img = cv2.imread(str(image_path), cv2.IMREAD_COLOR)  # BGR; cv2 writes BGR -> correct jpg
         if img is None:
             raise RuntimeError(f"cv2 could not read {image_path}")
+        # Bake ignore regions into display tiles. Source imagery is never modified, and
+        # deleted content cannot flash through while the vector canvas catches up to zoom.
+        if delete_path and delete_path.is_file():
+            for line in delete_path.read_text().splitlines():
+                values = []
+                for token in line.split():
+                    try:
+                        values.append(float(token) * delete_scale)
+                    except ValueError:
+                        break
+                if len(values) >= 6:
+                    if len(values) % 2:
+                        values = values[:-1]
+                    points = np.asarray(list(zip(values[0::2], values[1::2])), dtype=np.int32)
+                    cv2.fillPoly(img, [points], color=(0, 0, 0))
         h, w = img.shape[:2]
         top = max_level(w, h)
         ts, ov = config.TILE_SIZE, config.TILE_OVERLAP
@@ -138,6 +161,9 @@ def _build(source: str, stem: str, image_path: Path) -> None:
         _meta_path(pdir).write_text(json.dumps(dict(
             width=w, height=h, tile_size=ts, overlap=ov, format=ext,
             src_mtime=image_path.stat().st_mtime,
+            delete_mtime=(delete_path.stat().st_mtime
+                          if delete_path and delete_path.is_file() else None),
+            delete_scale=float(delete_scale),
         )))
         with _builds_lock:
             _builds.pop(key, None)  # meta.json now marks it ready

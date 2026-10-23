@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VisionBoard v9 · Test85 confusion</title>
+<link rel="stylesheet" href="/static/confusion.css"><style>.pcamo{display:inline-block;padding:2px 6px;border:1px solid #b18cff;border-radius:10px;background:#39285c;color:#e1d2ff;font-size:11px}</style></head><body>
+<header><button id="back">← VisionBoard</button><div><b>Test85 Stage-2 confusion</b><span>October 2026 · deployed ensemble</span></div></header>
+<main>
+<section class="toolbar">
+ <label>P_Camo<select id="mode"><option value="simple">P_Camo → camo</option><option value="actual">P_Camo → actual class</option></select></label>
+ <label>View<select id="view"><option value="parent">8 parent classes</option><option value="child">Children grouped by parent</option></select></label>
+ <label>Values<select id="values"><option value="count">Raw count</option><option value="percent">Row percentage</option></select></label>
+ <label>Filter<input id="filter" placeholder="Parent or child class"></label>
+</section>
+<section id="summary" class="summary"></section>
+<div class="matrix-wrap"><table id="matrix"></table></div>
+<div class="legend"><i class="correct"></i>Correct <i class="wrong"></i>Misclassified <i class="missed"></i>Missed GT <i class="fp"></i>Background / FP</div>
+<section class="detail"><div class="detail-head"><h2 id="detail-title">Click a cell to inspect its records</h2><button id="copy" disabled>Copy records</button></div><div id="records" class="records muted">No cell selected.</div></section>
+</main><script src="/static/confusion.js?v=9.0.2"></script></body></html>
